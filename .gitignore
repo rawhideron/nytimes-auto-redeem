@@ -1,1 +1,22 @@
-cookies
+# Sensitive authentication data
+cookies/
+*.json
+
+# Docker volumes
+volumes/
+
+# Node modules
+node_modules/
+
+# Environment variables
+.env
+
+# Log files
+*.log
+
+# Screenshots (may contain sensitive info)
+*.png
+
+# OS files
+.DS_Store
+Thumbs.db
