@@ -183,9 +183,3 @@ if (process.argv.includes('--manual-login')) {
             process.exit(1);
         });
 }
-```
-
-And make sure your **crontab** file is separate:
-```
-# Run at 6 AM ET daily (11 AM UTC, adjust based on DST)
-# 0 11 * * * cd /app && /usr/local/bin/node /app/redeem.js >> /var/log/cron.log 2>&1
