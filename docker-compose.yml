@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  nytimes-redeem:
+    build: .
+    container_name: nytimes-redeem
+    volumes:
+      - ./cookies:/app/cookies
+    environment:
+      - TZ=America/New_York
+    restart: unless-stopped
