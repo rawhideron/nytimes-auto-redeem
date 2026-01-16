@@ -1,9 +1,18 @@
+const COOKIES_PATH = path.join(__dirname, 'cookies', 'nytimes-cookies.json');
+const REDEEM_URL = 'https://www.nytimes.com/subscription/redeem?campaignId=6Y9QR&gift_code=24170f51d678a288';
+
 const puppeteer = require('puppeteer');
 const fs = require('fs').promises;
 const path = require('path');
 
 const COOKIES_PATH = path.join(__dirname, 'cookies', 'nytimes-cookies.json');
-const REDEEM_URL = 'https://www.nytimes.com/subscription/redeem?campaignId=6Y9QR&gift_code=24170f51d678a288';
+const REDEEM_URL = process.env.NYTIMES_REDEEM_URL || 'https://www.nytimes.com/subscription/redeem';
+
+if (!process.env.NYTIMES_REDEEM_URL) {
+    console.error('ERROR: NYTIMES_REDEEM_URL environment variable not set');
+    process.exit(1);
+}
+
 
 async function loadCookies(page) {
     try {

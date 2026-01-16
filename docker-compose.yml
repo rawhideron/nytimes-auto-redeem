@@ -8,4 +8,6 @@ services:
       - ./cookies:/app/cookies
     environment:
       - TZ=America/New_York
+    env_file:
+      - .env
     restart: unless-stopped
