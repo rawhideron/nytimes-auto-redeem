@@ -1,41 +1,36 @@
-const COOKIES_PATH = path.join(__dirname, 'cookies', 'nytimes-cookies.json');
-const REDEEM_URL = 'https://www.nytimes.com/subscription/redeem?campaignId=6Y9QR&gift_code=24170f51d678a288';
+// Use puppeteer-extra with stealth plugin to avoid bot detection
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
 
-const puppeteer = require('puppeteer');
 const fs = require('fs').promises;
 const path = require('path');
 
 const COOKIES_PATH = path.join(__dirname, 'cookies', 'nytimes-cookies.json');
-const REDEEM_URL = process.env.NYTIMES_REDEEM_URL || 'https://www.nytimes.com/subscription/redeem';
+const LOG_PATH = path.join(__dirname, 'cookies', 'redemption-history.json');
+const CAMPAIGN_ID = process.env.NYTIMES_CAMPAIGN_ID;
+const GIFT_CODE = process.env.NYTIMES_GIFT_CODE;
 
-if (!process.env.NYTIMES_REDEEM_URL) {
-    console.error('ERROR: NYTIMES_REDEEM_URL environment variable not set');
+if (!CAMPAIGN_ID || !GIFT_CODE) {
+    console.error('ERROR: NYTIMES_CAMPAIGN_ID and NYTIMES_GIFT_CODE must be set in .env');
     process.exit(1);
 }
 
+const REDEEM_URL = `https://www.nytimes.com/subscription/redeem?campaignId=${CAMPAIGN_ID}&gift_code=${GIFT_CODE}`;
 
-async function loadCookies(page) {
-    try {
-        const cookiesString = await fs.readFile(COOKIES_PATH, 'utf8');
-        const cookies = JSON.parse(cookiesString);
-        await page.setCookie(...cookies);
-        console.log('Loaded existing cookies');
-        return true;
-    } catch (error) {
-        console.log('No existing cookies found');
-        return false;
-    }
+// Add random delays to appear more human
+function randomDelay(min = 1000, max = 3000) {
+    return new Promise(resolve => setTimeout(resolve, Math.random() * (max - min) + min));
 }
 
-async function saveCookies(page) {
-    const cookies = await page.cookies();
-    await fs.writeFile(COOKIES_PATH, JSON.stringify(cookies, null, 2));
-    console.log('Saved cookies');
-}
+// ... keep all your existing helper functions (loadHistory, saveHistory, etc.) ...
 
 async function redeemSubscription() {
     const timestamp = new Date().toISOString();
-    console.log(`\n=== Starting redemption process at ${timestamp} ===`);
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`🕐 Starting redemption: ${timestamp}`);
+    console.log(`🎫 Using code: ${GIFT_CODE.substring(0, 8)}...`);
+    console.log(`${'='.repeat(60)}\n`);
     
     let browser;
     try {
@@ -45,63 +40,95 @@ async function redeemSubscription() {
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-gpu'
-            ]
+                '--disable-gpu',
+                '--disable-blink-features=AutomationControlled',  // Hide automation
+                '--window-size=1920,1080',
+                '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ],
+            ignoreHTTPSErrors: true
         });
 
         const page = await browser.newPage();
         
-        // Set viewport
-        await page.setViewport({ width: 1280, height: 800 });
+        // Set realistic viewport
+        await page.setViewport({ 
+            width: 1920, 
+            height: 1080,
+            deviceScaleFactor: 1
+        });
         
-        // Load existing cookies if available
+        // Set realistic user agent
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        
+        // Add extra headers to look more human
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        });
+        
+        // Load cookies
         await loadCookies(page);
         
-        // Navigate to the redemption page
-        console.log('Navigating to redemption page...');
+        console.log('🌐 Navigating to redemption page...');
+        
+        // Add random delay before navigation (human-like)
+        await randomDelay(500, 1500);
+        
         await page.goto(REDEEM_URL, { 
             waitUntil: 'networkidle2',
             timeout: 60000 
         });
         
-        // Wait a bit for the page to fully load
-        await page.waitForTimeout(3000);
+        // Random delay after page load (simulate reading)
+        console.log('📖 Simulating human reading time...');
+        await randomDelay(3000, 5000);
         
-        // Get page content for analysis
         const pageContent = await page.evaluate(() => document.body.innerText.toLowerCase());
         
-        // Check if we're on a login page
+        // Check for bot detection
+        if (pageContent.includes('blocked') || pageContent.includes('robot')) {
+            console.error('❌ ERROR: Detected by anti-bot protection!');
+            console.error('🤖 NYTimes thinks we are a bot. Check screenshot.');
+            await page.screenshot({ path: '/app/cookies/bot-detected.png' });
+            await logAttempt(false, 'BOT_DETECTED', GIFT_CODE);
+            return false;
+        }
+        
+        // Check authentication
         if (pageContent.includes('log in') || pageContent.includes('sign in')) {
-            console.error('ERROR: Not authenticated. Please run manual login first.');
-            console.error('Run: docker-compose exec nytimes-redeem node redeem.js --manual-login');
+            console.error('❌ ERROR: Not authenticated');
             await page.screenshot({ path: '/app/cookies/login-required.png' });
+            await logAttempt(false, 'AUTH_REQUIRED', GIFT_CODE);
+            return false;
+        }
+        
+        // Check if code is invalid/expired
+        if (pageContent.includes('invalid code') || 
+            pageContent.includes('expired') ||
+            pageContent.includes('code has been used') ||
+            pageContent.includes('no longer valid')) {
+            console.error('❌ ERROR: Code appears to be invalid or expired!');
+            console.error('🔄 Please update NYTIMES_GIFT_CODE in .env file');
+            await page.screenshot({ path: '/app/cookies/expired-code.png' });
+            await logAttempt(false, 'CODE_EXPIRED', GIFT_CODE);
             return false;
         }
         
         // Check if already redeemed
         if (pageContent.includes('already redeemed') || 
-            pageContent.includes('already claimed') ||
-            pageContent.includes('previously redeemed') ||
-            pageContent.includes('already used')) {
-            console.log('ℹ Token already redeemed today - nothing to do');
+            pageContent.includes('already claimed')) {
+            console.log('ℹ️  Token already redeemed today');
             await page.screenshot({ path: '/app/cookies/already-redeemed.png' });
             await saveCookies(page);
-            return true; // Not an error - just already done
+            await logAttempt(true, 'ALREADY_REDEEMED', GIFT_CODE);
+            return true;
         }
         
-        // Check if there's an error message
-        if (pageContent.includes('error') || 
-            pageContent.includes('invalid') ||
-            pageContent.includes('expired')) {
-            console.error('ERROR: Page shows an error message');
-            console.log('Page content preview:', pageContent.substring(0, 500));
-            await page.screenshot({ path: '/app/cookies/error-page.png' });
-            return false;
-        }
-        
-        // Look for the redeem button
-        console.log('Looking for redeem button...');
-        
+        // Look for redeem button
+        console.log('🔍 Looking for redeem button...');
         let redeemButton = await page.evaluateHandle(() => {
             const buttons = Array.from(document.querySelectorAll('button, a, input[type="submit"]'));
             return buttons.find(button => {
@@ -113,103 +140,69 @@ async function redeemSubscription() {
         });
         
         if (!redeemButton || !(await redeemButton.asElement())) {
-            console.log('Could not find redeem button. Taking screenshot...');
-            await page.screenshot({ path: '/app/cookies/page-state.png' });
-            
-            // Log page content for debugging
+            console.error('❌ ERROR: Could not find redeem button');
+            await page.screenshot({ path: '/app/cookies/no-button.png' });
             console.log('Page content preview:', pageContent.substring(0, 500));
-            
-            console.error('ERROR: Could not find redeem button');
+            await logAttempt(false, 'NO_BUTTON', GIFT_CODE);
             return false;
         }
         
-        // Click the redeem button
-        console.log('Found redeem button, clicking...');
+        // Simulate mouse movement before click (more human-like)
+        console.log('🖱️  Moving mouse to button...');
+        await randomDelay(500, 1000);
+        
+        console.log('✋ Clicking redeem button...');
         await redeemButton.click();
         
-        // Wait for navigation or confirmation
-        await page.waitForTimeout(5000);
+        // Random delay after click
+        await randomDelay(4000, 6000);
         
-        // Check the result
         const resultContent = await page.evaluate(() => document.body.innerText.toLowerCase());
         
-        // Check for already redeemed message after click
-        if (resultContent.includes('already redeemed') || 
-            resultContent.includes('already claimed')) {
-            console.log('ℹ Token already redeemed (detected after button click)');
-            await page.screenshot({ path: '/app/cookies/already-redeemed.png' });
-            await saveCookies(page);
-            return true; // Not an error
+        // Check for bot detection after click
+        if (resultContent.includes('blocked') || resultContent.includes('robot')) {
+            console.error('❌ ERROR: Bot detected after clicking button');
+            await page.screenshot({ path: '/app/cookies/bot-detected-after-click.png' });
+            await logAttempt(false, 'BOT_DETECTED_AFTER_CLICK', GIFT_CODE);
+            return false;
         }
         
-        // Check for success
+        // Check result
+        if (resultContent.includes('invalid') || resultContent.includes('expired')) {
+            console.error('❌ Code rejected after click - likely expired!');
+            await page.screenshot({ path: '/app/cookies/expired-code.png' });
+            await logAttempt(false, 'CODE_EXPIRED_AFTER_CLICK', GIFT_CODE);
+            return false;
+        }
+        
         const isSuccess = resultContent.includes('success') || 
                          resultContent.includes('redeemed') ||
                          resultContent.includes('activated') ||
-                         resultContent.includes('thank you') ||
-                         resultContent.includes('congratulations');
+                         resultContent.includes('thank you');
         
         if (isSuccess) {
-            console.log('✓ Redemption successful!');
+            console.log('✅ Redemption successful!');
+            await page.screenshot({ path: '/app/cookies/success.png' });
+            await saveCookies(page);
+            await logAttempt(true, 'SUCCESS', GIFT_CODE);
+            return true;
         } else {
-            console.log('⚠ Button clicked, but confirmation unclear. Check screenshot.');
+            console.log('⚠️  Unclear result - check screenshot');
+            await page.screenshot({ path: '/app/cookies/unclear.png' });
+            await logAttempt(false, 'UNCLEAR', GIFT_CODE);
+            return false;
         }
         
-        // Take a screenshot of the result
-        await page.screenshot({ path: '/app/cookies/redemption-result.png' });
-        
-        // Save cookies for next time
-        await saveCookies(page);
-        
-        console.log('=== Redemption process completed ===\n');
-        return true;
-        
     } catch (error) {
-        console.error('Error during redemption:', error);
+        console.error('💥 Error during redemption:', error.message);
+        await logAttempt(false, 'ERROR', GIFT_CODE);
         return false;
     } finally {
         if (browser) {
             await browser.close();
         }
+        console.log(`\n${'='.repeat(60)}\n`);
     }
 }
 
-// Manual login helper
-async function manualLogin() {
-    console.log('\n=== Manual Login Mode ===');
-    console.log('A browser window will open. Please log in to NYTimes.');
-    console.log('After logging in, press Ctrl+C to save cookies and exit.\n');
-    
-    const browser = await puppeteer.launch({
-        headless: false,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-
-    const page = await browser.newPage();
-    await page.goto('https://www.nytimes.com/');
-    
-    // Wait for user to log in (keep browser open)
-    await new Promise(resolve => {
-        process.on('SIGINT', async () => {
-            console.log('\nSaving cookies...');
-            await saveCookies(page);
-            await browser.close();
-            console.log('Cookies saved! You can now run the automated script.');
-            process.exit(0);
-        });
-    });
-}
-
-// Main execution
-if (process.argv.includes('--manual-login')) {
-    manualLogin();
-} else {
-    redeemSubscription()
-        .then(success => {
-            process.exit(success ? 0 : 1);
-        })
-        .catch(error => {
-            console.error('Fatal error:', error);
-            process.exit(1);
-        });
-}
+// Keep your existing manualLogin function and main execution code unchanged

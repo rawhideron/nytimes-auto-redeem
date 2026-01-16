@@ -3,10 +3,9 @@
   "version": "1.0.0",
   "description": "Automated NYTimes subscription redemption",
   "main": "redeem.js",
-  "scripts": {
-    "test": "node redeem.js"
-  },
   "dependencies": {
-    "puppeteer": "^21.5.0"
+    "puppeteer": "^21.5.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }
