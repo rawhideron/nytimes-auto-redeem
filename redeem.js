@@ -58,49 +58,57 @@ async function redeemSubscription() {
         // Wait a bit for the page to fully load
         await page.waitForTimeout(3000);
         
-        // Check if we're on a login page
-        const isLoginPage = await page.evaluate(() => {
-            return document.body.innerText.includes('Log in') || 
-                   document.body.innerText.includes('Sign in');
-        });
+        // Get page content for analysis
+        const pageContent = await page.evaluate(() => document.body.innerText.toLowerCase());
         
-        if (isLoginPage) {
+        // Check if we're on a login page
+        if (pageContent.includes('log in') || pageContent.includes('sign in')) {
             console.error('ERROR: Not authenticated. Please run manual login first.');
             console.error('Run: docker-compose exec nytimes-redeem node redeem.js --manual-login');
             await page.screenshot({ path: '/app/cookies/login-required.png' });
             return false;
         }
         
-        // Look for the redeem button - try multiple selectors
+        // Check if already redeemed
+        if (pageContent.includes('already redeemed') || 
+            pageContent.includes('already claimed') ||
+            pageContent.includes('previously redeemed') ||
+            pageContent.includes('already used')) {
+            console.log('ℹ Token already redeemed today - nothing to do');
+            await page.screenshot({ path: '/app/cookies/already-redeemed.png' });
+            await saveCookies(page);
+            return true; // Not an error - just already done
+        }
+        
+        // Check if there's an error message
+        if (pageContent.includes('error') || 
+            pageContent.includes('invalid') ||
+            pageContent.includes('expired')) {
+            console.error('ERROR: Page shows an error message');
+            console.log('Page content preview:', pageContent.substring(0, 500));
+            await page.screenshot({ path: '/app/cookies/error-page.png' });
+            return false;
+        }
+        
+        // Look for the redeem button
         console.log('Looking for redeem button...');
         
-        const buttonSelectors = [
-            'button:has-text("Redeem")',
-            'button:has-text("redeem")',
-            'a:has-text("Redeem")',
-            'a:has-text("redeem")',
-            'button[type="submit"]',
-            '.redeem-button',
-            '[data-testid*="redeem"]'
-        ];
-        
-        let redeemButton = null;
-        
-        // Try to find button by text content
-        redeemButton = await page.evaluateHandle(() => {
-            const buttons = Array.from(document.querySelectorAll('button, a'));
-            return buttons.find(button => 
-                button.textContent.toLowerCase().includes('redeem')
-            );
+        let redeemButton = await page.evaluateHandle(() => {
+            const buttons = Array.from(document.querySelectorAll('button, a, input[type="submit"]'));
+            return buttons.find(button => {
+                const text = button.textContent || button.value || '';
+                return text.toLowerCase().includes('redeem') ||
+                       text.toLowerCase().includes('claim') ||
+                       text.toLowerCase().includes('activate');
+            });
         });
         
         if (!redeemButton || !(await redeemButton.asElement())) {
-            console.log('Could not find redeem button by text. Taking screenshot...');
+            console.log('Could not find redeem button. Taking screenshot...');
             await page.screenshot({ path: '/app/cookies/page-state.png' });
             
             // Log page content for debugging
-            const bodyText = await page.evaluate(() => document.body.innerText);
-            console.log('Page content preview:', bodyText.substring(0, 500));
+            console.log('Page content preview:', pageContent.substring(0, 500));
             
             console.error('ERROR: Could not find redeem button');
             return false;
@@ -113,16 +121,29 @@ async function redeemSubscription() {
         // Wait for navigation or confirmation
         await page.waitForTimeout(5000);
         
-        // Check for success message
-        const pageContent = await page.evaluate(() => document.body.innerText);
-        const isSuccess = pageContent.toLowerCase().includes('success') || 
-                         pageContent.toLowerCase().includes('redeemed') ||
-                         pageContent.toLowerCase().includes('thank you');
+        // Check the result
+        const resultContent = await page.evaluate(() => document.body.innerText.toLowerCase());
+        
+        // Check for already redeemed message after click
+        if (resultContent.includes('already redeemed') || 
+            resultContent.includes('already claimed')) {
+            console.log('ℹ Token already redeemed (detected after button click)');
+            await page.screenshot({ path: '/app/cookies/already-redeemed.png' });
+            await saveCookies(page);
+            return true; // Not an error
+        }
+        
+        // Check for success
+        const isSuccess = resultContent.includes('success') || 
+                         resultContent.includes('redeemed') ||
+                         resultContent.includes('activated') ||
+                         resultContent.includes('thank you') ||
+                         resultContent.includes('congratulations');
         
         if (isSuccess) {
             console.log('✓ Redemption successful!');
         } else {
-            console.log('Button clicked, but confirmation unclear. Check screenshot.');
+            console.log('⚠ Button clicked, but confirmation unclear. Check screenshot.');
         }
         
         // Take a screenshot of the result
