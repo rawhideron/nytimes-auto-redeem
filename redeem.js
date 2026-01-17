@@ -12,6 +12,7 @@ const GIFT_CODE = process.env.NYTIMES_GIFT_CODE;
 const COOKIE_ENCRYPTION_KEY = process.env.COOKIE_ENCRYPTION_KEY;
 const LIBRARY_CARD_NUMBER = process.env.LIBRARY_CARD_NUMBER;
 const LIBRARY_PIN = process.env.LIBRARY_PIN;
+const CHROME_EXECUTABLE_PATH = process.env.CHROME_EXECUTABLE_PATH;
 const LIBRARY_LOGIN_URL = process.env.LIBRARY_LOGIN_URL ||
     'https://catalog.bccls.org/polaris/logon.aspx?ctx=37.1033.0.0.6';
 const FAIRVIEW_HOME_URL = process.env.FAIRVIEW_HOME_URL || 'https://fairviewlibrarynj.org/en/';
@@ -103,14 +104,41 @@ async function promptForLibraryCredentials() {
     };
 }
 
-async function findFirstSelector(page, selectors) {
+async function findFirstSelector(page, selectors, timeoutMs = 4000) {
     for (const selector of selectors) {
+        try {
+            await page.waitForSelector(selector, { timeout: timeoutMs });
+        } catch (error) {
+            continue;
+        }
+
         const handle = await page.$(selector);
         if (handle) {
             return handle;
         }
     }
     return null;
+}
+
+async function clickElement(elementHandle) {
+    if (!elementHandle) {
+        return false;
+    }
+
+    try {
+        await elementHandle.evaluate(el => {
+            el.scrollIntoView({ block: 'center', inline: 'center' });
+        });
+        await elementHandle.click({ delay: 50 });
+        return true;
+    } catch (error) {
+        try {
+            await elementHandle.evaluate(el => el.click());
+            return true;
+        } catch (innerError) {
+            return false;
+        }
+    }
 }
 
 async function findButtonByText(page, textMatchers) {
@@ -160,23 +188,60 @@ async function loginToLibrary(page, { cardNumber, pin }) {
         return false;
     }
 
-    await cardInput.click({ clickCount: 3 });
-    await cardInput.type(cardNumber, { delay: 50 });
-    await randomDelay(200, 400);
-    await pinInput.click({ clickCount: 3 });
-    await pinInput.type(pin, { delay: 50 });
-
-    const loginButton = await findButtonByText(page, ['log in', 'sign in', 'submit']);
-    if (!loginButton) {
-        console.error('❌ ERROR: Could not find library login button.');
-        await page.screenshot({ path: '/app/cookies/library-login-missing-button.png' });
+    const cardClicked = await clickElement(cardInput);
+    if (!cardClicked) {
+        console.error('❌ ERROR: Library card input not clickable.');
+        await page.screenshot({ path: '/app/cookies/library-card-unclickable.png' });
         return false;
     }
 
-    await Promise.all([
-        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null),
-        loginButton.click()
+    await page.evaluate(el => el.select && el.select(), cardInput).catch(() => null);
+    await cardInput.type(cardNumber, { delay: 50 });
+    await randomDelay(200, 400);
+
+    const pinClicked = await clickElement(pinInput);
+    if (!pinClicked) {
+        console.error('❌ ERROR: Library PIN input not clickable.');
+        await page.screenshot({ path: '/app/cookies/library-pin-unclickable.png' });
+        return false;
+    }
+
+    await page.evaluate(el => el.select && el.select(), pinInput).catch(() => null);
+    await pinInput.type(pin, { delay: 50 });
+
+    const enterNavigation = page.waitForNavigation({
+        waitUntil: 'networkidle2',
+        timeout: 30000
+    }).catch(() => null);
+
+    await pinInput.press('Enter');
+    let navigated = await Promise.race([
+        enterNavigation,
+        page.waitForTimeout(1500).then(() => null)
     ]);
+
+    if (!navigated) {
+        const loginButton = await findButtonByText(page, ['log in', 'sign in', 'submit']);
+        if (!loginButton) {
+            console.error('❌ ERROR: Could not find library login button.');
+            await page.screenshot({ path: '/app/cookies/library-login-missing-button.png' });
+            return false;
+        }
+
+        const clickNavigation = page.waitForNavigation({
+            waitUntil: 'networkidle2',
+            timeout: 30000
+        }).catch(() => null);
+
+        const clicked = await clickElement(loginButton);
+        if (!clicked) {
+            console.error('❌ ERROR: Login button not clickable.');
+            await page.screenshot({ path: '/app/cookies/library-login-unclickable.png' });
+            return false;
+        }
+
+        navigated = await clickNavigation;
+    }
 
     const pageText = await page.evaluate(() => document.body.innerText.toLowerCase());
     if (pageText.includes('library card') && pageText.includes('password')) {
@@ -235,7 +300,12 @@ async function openNyTimesFromFairview(page, browser) {
         timeout: 30000
     }).then(() => page).catch(() => null);
 
-    await linkElement.click();
+    const clicked = await clickElement(linkElement);
+    if (!clicked) {
+        console.error('❌ ERROR: NY Times link not clickable.');
+        await page.screenshot({ path: '/app/cookies/fairview-nytimes-unclickable.png' });
+        return null;
+    }
 
     const nytimesPage = await Promise.race([newPagePromise, navigationPromise]);
     if (!nytimesPage) {
@@ -399,6 +469,7 @@ async function redeemSubscription() {
     try {
         browser = await puppeteer.launch({
             headless: 'new',
+            executablePath: CHROME_EXECUTABLE_PATH || undefined,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -531,7 +602,14 @@ async function redeemSubscription() {
         await randomDelay(500, 1000);
         
         console.log('✋ Clicking redeem button...');
-        await redeemButton.click();
+        const redeemElement = await redeemButton.asElement();
+        const clicked = await clickElement(redeemElement);
+        if (!clicked) {
+            console.error('❌ ERROR: Redeem button not clickable');
+            await nytimesPage.screenshot({ path: '/app/cookies/redeem-unclickable.png' });
+            await logAttempt(false, 'REDEEM_UNCLICKABLE', GIFT_CODE);
+            return false;
+        }
         
         // Random delay after click
         await randomDelay(4000, 6000);

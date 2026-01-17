@@ -63,6 +63,10 @@ Optional URL overrides:
 
 - `LIBRARY_LOGIN_URL`: defaults to the Fairview/BCCLS login page.
 - `FAIRVIEW_HOME_URL`: defaults to `https://fairviewlibrarynj.org/en/`.
+- `CHROME_EXECUTABLE_PATH`: path to a local Chrome binary (uses Chrome instead
+  of bundled Chromium).
+- `USER_DATA_DIR`: path to a Chrome user data directory to reuse an existing
+  profile (you must provide it locally).
 
 The `.env` file is loaded by Docker (`docker-compose.yml`) and should stay out
 of version control to avoid leaks of paid subscription codes.
