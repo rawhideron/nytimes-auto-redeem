@@ -1,6 +1,7 @@
 # Sensitive authentication data
 cookies/
 *.json
+!package-lock.json
 
 # Docker volumes
 volumes/
