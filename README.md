@@ -8,8 +8,8 @@ records each attempt with screenshots and history.
 
 The goal is to redeem a time-limited gift code reliably without manual steps:
 
-- Open the NYTimes redemption URL built from `NYTIMES_CAMPAIGN_ID` and
-  `NYTIMES_GIFT_CODE`.
+- Log in to the Fairview/BCCLS library portal (optional when cookies exist).
+- Visit the Fairview Library site and open the NY Times redemption link.
 - Detect common failure modes (auth required, bot detection, expired code).
 - Click the redeem/claim button when available.
 - Save cookies and log results to track success over time.
@@ -20,6 +20,8 @@ The goal is to redeem a time-limited gift code reliably without manual steps:
   plugin to reduce bot detection.
 - Cookies and redemption history are stored under `cookies/` (mounted as a
   volume in Docker).
+- The script does not go directly to `nytimes.com`; it follows the Fairview
+  Library → NY Times link.
 - A cron job inside the container runs the redemption daily.
 
 ## Functions and what they do
@@ -38,9 +40,13 @@ From `redeem.js`:
   the browser session (decrypts when `COOKIE_ENCRYPTION_KEY` is set).
 - `saveCookies(page)`: writes the current browser cookies to disk (encrypts
   when `COOKIE_ENCRYPTION_KEY` is set).
-- `redeemSubscription()`: main flow that launches the browser, navigates to the
-  redemption page, checks for failure states, clicks the redeem button, and
-  logs the result.
+- `loginToLibrary(page, credentials)`: signs in to the Fairview/BCCLS portal.
+- `openNyTimesFromFairview(page, browser)`: opens the NY Times link from the
+  Fairview Library site.
+- `ensureGiftCodeFilled(page)`: fills the gift code if the page asks for it.
+- `redeemSubscription()`: main flow that launches the browser, follows the
+  Fairview → NY Times path, checks for failure states, clicks the redeem button,
+  and logs the result.
 - `manualLogin()`: opens a visible browser so you can log in and save cookies.
 - `showHistory()`: prints a summary of past attempts.
 
@@ -49,8 +55,14 @@ From `redeem.js`:
 Sensitive values are read from environment variables via a `.env` file instead
 of hard-coding them:
 
-- `NYTIMES_CAMPAIGN_ID`: prevents the campaign ID from being committed.
 - `NYTIMES_GIFT_CODE`: prevents the gift code from being committed.
+- `LIBRARY_CARD_NUMBER`: library card number for the Fairview/BCCLS login.
+- `LIBRARY_PIN`: library PIN/password for the Fairview/BCCLS login.
+
+Optional URL overrides:
+
+- `LIBRARY_LOGIN_URL`: defaults to the Fairview/BCCLS login page.
+- `FAIRVIEW_HOME_URL`: defaults to `https://fairviewlibrarynj.org/en/`.
 
 The `.env` file is loaded by Docker (`docker-compose.yml`) and should stay out
 of version control to avoid leaks of paid subscription codes.
@@ -100,10 +112,10 @@ Notes:
                    +--------+--------+
                             |
                             v
-             +------------------------------+
-             | load cookies + open redeem   |
-             | URL with campaign + gift     |
-             +--------------+---------------+
+            +------------------------------+
+            | load cookies + library login |
+            | open Fairview NY Times link  |
+            +--------------+---------------+
                             |
                  +----------+----------+
                  | page checks         |
@@ -114,9 +126,9 @@ Notes:
      -> screenshot         |         -> screenshot + log FAIL
      + log FAIL            |
                            |
-     auth required --------+
-     -> screenshot + log FAIL
-     -> manual-login suggested
+    auth required --------+
+    -> screenshot + log FAIL
+    -> manual-login suggested
                            |
                            v
                +------------------------+
@@ -136,7 +148,7 @@ Notes:
 
 ```
 npm install
-NYTIMES_CAMPAIGN_ID=... NYTIMES_GIFT_CODE=... node redeem.js
+NYTIMES_GIFT_CODE=... LIBRARY_CARD_NUMBER=... LIBRARY_PIN=... node redeem.js
 ```
 
 ## Run with Docker
@@ -150,6 +162,14 @@ Manual login (to save cookies):
 
 ```
 docker-compose exec nytimes-redeem node redeem.js --manual-login
+```
+Then log in to the BCCLS portal, open the Fairview site, and click the NY Times
+icon before pressing `Ctrl+C` to save cookies.
+
+Prompt for library credentials (avoids storing in `.env`):
+
+```
+docker-compose exec nytimes-redeem node redeem.js --prompt-library-credentials
 ```
 
 Show history:

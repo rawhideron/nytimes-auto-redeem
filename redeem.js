@@ -8,21 +8,26 @@ const crypto = require('crypto');
 
 const COOKIES_PATH = path.join(__dirname, 'cookies', 'nytimes-cookies.json');
 const LOG_PATH = path.join(__dirname, 'cookies', 'redemption-history.json');
-const CAMPAIGN_ID = process.env.NYTIMES_CAMPAIGN_ID;
 const GIFT_CODE = process.env.NYTIMES_GIFT_CODE;
 const COOKIE_ENCRYPTION_KEY = process.env.COOKIE_ENCRYPTION_KEY;
+const LIBRARY_CARD_NUMBER = process.env.LIBRARY_CARD_NUMBER;
+const LIBRARY_PIN = process.env.LIBRARY_PIN;
+const LIBRARY_LOGIN_URL = process.env.LIBRARY_LOGIN_URL ||
+    'https://catalog.bccls.org/polaris/logon.aspx?ctx=37.1033.0.0.6';
+const FAIRVIEW_HOME_URL = process.env.FAIRVIEW_HOME_URL || 'https://fairviewlibrarynj.org/en/';
 
-if (!CAMPAIGN_ID || !GIFT_CODE) {
-    console.error('ERROR: NYTIMES_CAMPAIGN_ID and NYTIMES_GIFT_CODE must be set in .env');
+if (!GIFT_CODE) {
+    console.error('ERROR: NYTIMES_GIFT_CODE must be set in .env');
     process.exit(1);
 }
-
-const REDEEM_URL = `https://www.nytimes.com/subscription/redeem?campaignId=${CAMPAIGN_ID}&gift_code=${GIFT_CODE}`;
 
 // Random delay to simulate human behavior
 function randomDelay(min = 1000, max = 3000) {
     return new Promise(resolve => setTimeout(resolve, Math.random() * (max - min) + min));
 }
+
+const CLI_ARGS = new Set(process.argv.slice(2));
+const SHOULD_PROMPT_LIBRARY_CREDENTIALS = CLI_ARGS.has('--prompt-library-credentials');
 
 function hasCookieEncryptionKey() {
     return typeof COOKIE_ENCRYPTION_KEY === 'string' && COOKIE_ENCRYPTION_KEY.length > 0;
@@ -74,6 +79,198 @@ function decryptString(payload) {
     ]);
 
     return plaintext.toString('utf8');
+}
+
+async function promptForLibraryCredentials() {
+    const readline = require('readline');
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
+
+    const ask = (question) => new Promise(resolve => {
+        rl.question(question, answer => resolve(answer.trim()));
+    });
+
+    const cardNumber = LIBRARY_CARD_NUMBER || await ask('Library card # (BCCLS): ');
+    const pin = LIBRARY_PIN || await ask('Library PIN/password: ');
+
+    rl.close();
+
+    return {
+        cardNumber,
+        pin
+    };
+}
+
+async function findFirstSelector(page, selectors) {
+    for (const selector of selectors) {
+        const handle = await page.$(selector);
+        if (handle) {
+            return handle;
+        }
+    }
+    return null;
+}
+
+async function findButtonByText(page, textMatchers) {
+    const handle = await page.evaluateHandle((matchers) => {
+        const candidates = Array.from(document.querySelectorAll('button, input[type="submit"], a'));
+        const lowerMatchers = matchers.map(m => m.toLowerCase());
+
+        return candidates.find(el => {
+            const text = (el.textContent || el.value || '').toLowerCase();
+            return lowerMatchers.some(matcher => text.includes(matcher));
+        }) || null;
+    }, textMatchers);
+
+    const element = await handle.asElement();
+    if (!element) {
+        await handle.dispose();
+        return null;
+    }
+    return element;
+}
+
+async function loginToLibrary(page, { cardNumber, pin }) {
+    console.log('🔐 Logging in to Fairview/BCCLS...');
+    await page.goto(LIBRARY_LOGIN_URL, {
+        waitUntil: 'networkidle2',
+        timeout: 60000
+    });
+
+    const cardInput = await findFirstSelector(page, [
+        'input[name="barcode"]',
+        'input#barcode',
+        'input[name="username"]',
+        'input#username',
+        'input[type="text"]'
+    ]);
+    const pinInput = await findFirstSelector(page, [
+        'input[type="password"]',
+        'input[name="password"]',
+        'input#password',
+        'input[name="pin"]',
+        'input#pin'
+    ]);
+
+    if (!cardInput || !pinInput) {
+        console.error('❌ ERROR: Could not locate library login inputs.');
+        await page.screenshot({ path: '/app/cookies/library-login-missing-inputs.png' });
+        return false;
+    }
+
+    await cardInput.click({ clickCount: 3 });
+    await cardInput.type(cardNumber, { delay: 50 });
+    await randomDelay(200, 400);
+    await pinInput.click({ clickCount: 3 });
+    await pinInput.type(pin, { delay: 50 });
+
+    const loginButton = await findButtonByText(page, ['log in', 'sign in', 'submit']);
+    if (!loginButton) {
+        console.error('❌ ERROR: Could not find library login button.');
+        await page.screenshot({ path: '/app/cookies/library-login-missing-button.png' });
+        return false;
+    }
+
+    await Promise.all([
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null),
+        loginButton.click()
+    ]);
+
+    const pageText = await page.evaluate(() => document.body.innerText.toLowerCase());
+    if (pageText.includes('library card') && pageText.includes('password')) {
+        console.warn('⚠️  Library login may have failed. Check credentials.');
+    }
+
+    return true;
+}
+
+async function openNyTimesFromFairview(page, browser) {
+    console.log('🌐 Navigating to Fairview Library site...');
+    await page.goto(FAIRVIEW_HOME_URL, {
+        waitUntil: 'networkidle2',
+        timeout: 60000
+    });
+
+    const nytimesLink = await page.evaluateHandle(() => {
+        const links = Array.from(document.querySelectorAll('a'));
+        const linkByText = links.find(link => {
+            const text = (link.textContent || '').toLowerCase();
+            return text.includes('ny times') || text.includes('nytimes');
+        });
+
+        if (linkByText) {
+            return linkByText;
+        }
+
+        const image = Array.from(document.querySelectorAll('img')).find(img => {
+            const alt = (img.getAttribute('alt') || '').toLowerCase();
+            return alt.includes('ny times') || alt.includes('nytimes');
+        });
+
+        return image ? image.closest('a') : null;
+    });
+
+    const linkElement = await nytimesLink.asElement();
+    if (!linkElement) {
+        console.error('❌ ERROR: Could not find NY Times link on Fairview site.');
+        await page.screenshot({ path: '/app/cookies/fairview-no-nytimes.png' });
+        return null;
+    }
+
+    const newPagePromise = new Promise(resolve => {
+        const handler = async (target) => {
+            if (target.type() !== 'page') {
+                return;
+            }
+            browser.off('targetcreated', handler);
+            resolve(await target.page());
+        };
+        browser.on('targetcreated', handler);
+    });
+
+    const navigationPromise = page.waitForNavigation({
+        waitUntil: 'networkidle2',
+        timeout: 30000
+    }).then(() => page).catch(() => null);
+
+    await linkElement.click();
+
+    const nytimesPage = await Promise.race([newPagePromise, navigationPromise]);
+    if (!nytimesPage) {
+        console.error('❌ ERROR: NY Times redemption page did not open.');
+        await page.screenshot({ path: '/app/cookies/fairview-nytimes-timeout.png' });
+        return null;
+    }
+
+    await nytimesPage.bringToFront();
+    return nytimesPage;
+}
+
+async function ensureGiftCodeFilled(page) {
+    if (!GIFT_CODE) {
+        return;
+    }
+
+    const giftInput = await findFirstSelector(page, [
+        'input[name="gift_code"]',
+        'input#gift_code',
+        'input[name="giftCode"]',
+        'input[type="text"]'
+    ]);
+
+    if (!giftInput) {
+        return;
+    }
+
+    const currentValue = await page.evaluate(el => el.value, giftInput);
+    if (currentValue && currentValue.trim().length > 0) {
+        return;
+    }
+
+    await giftInput.click({ clickCount: 3 });
+    await giftInput.type(GIFT_CODE, { delay: 40 });
 }
 
 // Redemption history tracking
@@ -237,28 +434,42 @@ async function redeemSubscription() {
         
         // Load cookies
         await loadCookies(page);
-        
-        console.log('🌐 Navigating to redemption page...');
-        
+
+        const credentials = SHOULD_PROMPT_LIBRARY_CREDENTIALS
+            ? await promptForLibraryCredentials()
+            : { cardNumber: LIBRARY_CARD_NUMBER, pin: LIBRARY_PIN };
+
+        if (credentials.cardNumber && credentials.pin) {
+            await loginToLibrary(page, credentials);
+        } else {
+            console.log('ℹ️  No library credentials provided. Attempting without login.');
+        }
+
+        console.log('🌐 Opening NY Times redemption from Fairview site...');
+
         // Add random delay before navigation (human-like)
         await randomDelay(500, 1500);
-        
-        await page.goto(REDEEM_URL, { 
-            waitUntil: 'networkidle2',
-            timeout: 60000 
-        });
+
+        const nytimesPage = await openNyTimesFromFairview(page, browser);
+        if (!nytimesPage) {
+            await logAttempt(false, 'NYTIMES_LINK_FAILED', GIFT_CODE);
+            return false;
+        }
+
+        // Ensure gift code is filled if the page expects input
+        await ensureGiftCodeFilled(nytimesPage);
         
         // Random delay after page load (simulate reading)
         console.log('📖 Simulating human reading time...');
         await randomDelay(3000, 5000);
         
-        const pageContent = await page.evaluate(() => document.body.innerText.toLowerCase());
+        const pageContent = await nytimesPage.evaluate(() => document.body.innerText.toLowerCase());
         
         // Check for bot detection
         if (pageContent.includes('blocked') || pageContent.includes('robot')) {
             console.error('❌ ERROR: Detected by anti-bot protection!');
             console.error('🤖 NYTimes thinks we are a bot. Try manual login first.');
-            await page.screenshot({ path: '/app/cookies/bot-detected.png' });
+            await nytimesPage.screenshot({ path: '/app/cookies/bot-detected.png' });
             await logAttempt(false, 'BOT_DETECTED', GIFT_CODE);
             return false;
         }
@@ -267,7 +478,8 @@ async function redeemSubscription() {
         if (pageContent.includes('log in') || pageContent.includes('sign in')) {
             console.error('❌ ERROR: Not authenticated');
             console.error('Run: docker-compose exec nytimes-redeem node redeem.js --manual-login');
-            await page.screenshot({ path: '/app/cookies/login-required.png' });
+            console.error('Or provide library credentials with --prompt-library-credentials.');
+            await nytimesPage.screenshot({ path: '/app/cookies/login-required.png' });
             await logAttempt(false, 'AUTH_REQUIRED', GIFT_CODE);
             return false;
         }
@@ -279,7 +491,7 @@ async function redeemSubscription() {
             pageContent.includes('no longer valid')) {
             console.error('❌ ERROR: Code appears to be invalid or expired!');
             console.error('🔄 Please update NYTIMES_GIFT_CODE in .env file');
-            await page.screenshot({ path: '/app/cookies/expired-code.png' });
+            await nytimesPage.screenshot({ path: '/app/cookies/expired-code.png' });
             await logAttempt(false, 'CODE_EXPIRED', GIFT_CODE);
             return false;
         }
@@ -288,15 +500,15 @@ async function redeemSubscription() {
         if (pageContent.includes('already redeemed') || 
             pageContent.includes('already claimed')) {
             console.log('ℹ️  Token already redeemed today');
-            await page.screenshot({ path: '/app/cookies/already-redeemed.png' });
-            await saveCookies(page);
+            await nytimesPage.screenshot({ path: '/app/cookies/already-redeemed.png' });
+            await saveCookies(nytimesPage);
             await logAttempt(true, 'ALREADY_REDEEMED', GIFT_CODE);
             return true;
         }
         
         // Look for redeem button
         console.log('🔍 Looking for redeem button...');
-        let redeemButton = await page.evaluateHandle(() => {
+        let redeemButton = await nytimesPage.evaluateHandle(() => {
             const buttons = Array.from(document.querySelectorAll('button, a, input[type="submit"]'));
             return buttons.find(button => {
                 const text = button.textContent || button.value || '';
@@ -308,7 +520,7 @@ async function redeemSubscription() {
         
         if (!redeemButton || !(await redeemButton.asElement())) {
             console.error('❌ ERROR: Could not find redeem button');
-            await page.screenshot({ path: '/app/cookies/no-button.png' });
+            await nytimesPage.screenshot({ path: '/app/cookies/no-button.png' });
             console.log('Page content preview:', pageContent.substring(0, 500));
             await logAttempt(false, 'NO_BUTTON', GIFT_CODE);
             return false;
@@ -324,12 +536,12 @@ async function redeemSubscription() {
         // Random delay after click
         await randomDelay(4000, 6000);
         
-        const resultContent = await page.evaluate(() => document.body.innerText.toLowerCase());
+        const resultContent = await nytimesPage.evaluate(() => document.body.innerText.toLowerCase());
         
         // Check for bot detection after click
         if (resultContent.includes('blocked') || resultContent.includes('robot')) {
             console.error('❌ ERROR: Bot detected after clicking button');
-            await page.screenshot({ path: '/app/cookies/bot-detected-after-click.png' });
+            await nytimesPage.screenshot({ path: '/app/cookies/bot-detected-after-click.png' });
             await logAttempt(false, 'BOT_DETECTED_AFTER_CLICK', GIFT_CODE);
             return false;
         }
@@ -337,7 +549,7 @@ async function redeemSubscription() {
         // Check result
         if (resultContent.includes('invalid') || resultContent.includes('expired')) {
             console.error('❌ Code rejected after click - likely expired!');
-            await page.screenshot({ path: '/app/cookies/expired-code.png' });
+            await nytimesPage.screenshot({ path: '/app/cookies/expired-code.png' });
             await logAttempt(false, 'CODE_EXPIRED_AFTER_CLICK', GIFT_CODE);
             return false;
         }
@@ -349,13 +561,13 @@ async function redeemSubscription() {
         
         if (isSuccess) {
             console.log('✅ Redemption successful!');
-            await page.screenshot({ path: '/app/cookies/success.png' });
-            await saveCookies(page);
+            await nytimesPage.screenshot({ path: '/app/cookies/success.png' });
+            await saveCookies(nytimesPage);
             await logAttempt(true, 'SUCCESS', GIFT_CODE);
             return true;
         } else {
             console.log('⚠️  Unclear result - check screenshot');
-            await page.screenshot({ path: '/app/cookies/unclear.png' });
+            await nytimesPage.screenshot({ path: '/app/cookies/unclear.png' });
             await logAttempt(false, 'UNCLEAR', GIFT_CODE);
             return false;
         }
@@ -375,8 +587,9 @@ async function redeemSubscription() {
 // Manual login helper
 async function manualLogin() {
     console.log('\n=== Manual Login Mode ===');
-    console.log('A browser window will open. Please log in to NYTimes.');
-    console.log('After logging in, press Ctrl+C to save cookies and exit.\n');
+    console.log('A browser window will open to the Fairview/BCCLS login page.');
+    console.log('Log in, then visit the Fairview site and click the NY Times icon.');
+    console.log('Once the NY Times redemption page is open, press Ctrl+C to save cookies.\n');
     
     const browser = await puppeteer.launch({
         headless: false,
@@ -384,13 +597,21 @@ async function manualLogin() {
     });
 
     const page = await browser.newPage();
-    await page.goto('https://www.nytimes.com/');
+    let activePage = page;
+
+    browser.on('targetcreated', async target => {
+        if (target.type() === 'page') {
+            activePage = await target.page();
+        }
+    });
+
+    await page.goto(LIBRARY_LOGIN_URL);
     
     // Wait for user to log in (keep browser open)
     await new Promise(resolve => {
         process.on('SIGINT', async () => {
             console.log('\nSaving cookies...');
-            await saveCookies(page);
+            await saveCookies(activePage);
             await browser.close();
             console.log('Cookies saved! You can now run the automated script.');
             process.exit(0);
