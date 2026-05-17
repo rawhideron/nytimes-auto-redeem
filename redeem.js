@@ -27,7 +27,7 @@ const LOG_PATH = path.join(COOKIES_DIR, 'redemption-history.json');
 const SCREENSHOT_DIR = COOKIES_DIR;
 const USER_DATA_DIR = process.env.USER_DATA_DIR || path.join(COOKIES_DIR, 'chrome-profile');
 
-const GIFT_CODE = process.env.NYTIMES_GIFT_CODE;
+let giftCode = process.env.NYTIMES_GIFT_CODE || null;
 const COOKIE_ENCRYPTION_KEY = process.env.COOKIE_ENCRYPTION_KEY;
 const LIBRARY_CARD_NUMBER = process.env.LIBRARY_CARD_NUMBER;
 const LIBRARY_PIN = process.env.LIBRARY_PIN;
@@ -38,10 +38,6 @@ const FAIRVIEW_HOME_URL = process.env.FAIRVIEW_HOME_URL || 'https://fairviewlibr
 const TIMEZONE = process.env.TZ || 'America/New_York';
 const LOCALE = process.env.LOCALE || 'en-US';
 
-if (!GIFT_CODE) {
-    console.error('ERROR: NYTIMES_GIFT_CODE must be set in .env');
-    process.exit(1);
-}
 
 const CLI_ARGS = new Set(process.argv.slice(2));
 const SHOULD_PROMPT_LIBRARY_CREDENTIALS = CLI_ARGS.has('--prompt-library-credentials');
@@ -114,6 +110,34 @@ async function humanType(elementHandle, text) {
         await elementHandle.type(ch, { delay: 0 });
         await randomDelay(60, 180);
     }
+}
+
+// --------------------------------------------------------------------------
+// Gift code extraction helpers
+// --------------------------------------------------------------------------
+
+function extractCodeFromUrl(url) {
+    const patterns = [
+        /[?&](?:gift_?)?code=([A-Za-z0-9\-]{8,})/i,
+        /\/(?:gift|passes)\/([A-Za-z0-9\-]{8,})/i,
+    ];
+    for (const p of patterns) {
+        const m = url.match(p);
+        if (m) return m[1];
+    }
+    return null;
+}
+
+function extractCodeFromText(text) {
+    const patterns = [
+        /(?:gift|access|promo)\s+code[:\s]+([A-Z0-9]{8,})/i,
+        /\bcode[:\s]+([A-Z0-9]{12,})\b/i,
+    ];
+    for (const p of patterns) {
+        const m = text.match(p);
+        if (m) return m[1];
+    }
+    return null;
 }
 
 // --------------------------------------------------------------------------
@@ -416,6 +440,32 @@ async function openNyTimesFromFairview(page, browser) {
     // Spend a believable amount of time on the page before clicking out.
     await randomDelay(2500, 4500);
 
+    // Before clicking, check the NYT link's href and page text for an embedded gift code.
+    if (!giftCode) {
+        const nytLinkHref = await page.evaluate(() => {
+            const links = Array.from(document.querySelectorAll('a'));
+            const link = links.find(l => {
+                const text = (l.textContent || '').toLowerCase();
+                return text.includes('ny times') || text.includes('nytimes') || text.includes('new york times');
+            });
+            if (link) return link.href;
+            const img = Array.from(document.querySelectorAll('img')).find(i => {
+                const alt = (i.getAttribute('alt') || '').toLowerCase();
+                return alt.includes('ny times') || alt.includes('nytimes') || alt.includes('new york times');
+            });
+            return img?.closest('a')?.href || null;
+        });
+        if (nytLinkHref) {
+            const found = extractCodeFromUrl(nytLinkHref);
+            if (found) { giftCode = found; console.log('🎫 Extracted gift code from Fairview link'); }
+        }
+    }
+    if (!giftCode) {
+        const pageText = await page.evaluate(() => document.body.innerText);
+        const found = extractCodeFromText(pageText);
+        if (found) { giftCode = found; console.log('🎫 Extracted gift code from Fairview page text'); }
+    }
+
     const nytimesLink = await page.evaluateHandle(() => {
         const links = Array.from(document.querySelectorAll('a'));
         const linkByText = links.find(link => {
@@ -482,11 +532,24 @@ async function openNyTimesFromFairview(page, browser) {
     await applyStealthToPage(nytimesPage);
     await nytimesPage.bringToFront();
     await randomDelay(2000, 4000);
+
+    // Try to extract the gift code from the NYT page URL or visible content.
+    if (!giftCode) {
+        const nytUrl = nytimesPage.url();
+        const found = extractCodeFromUrl(nytUrl);
+        if (found) { giftCode = found; console.log('🎫 Extracted gift code from NY Times URL'); }
+    }
+    if (!giftCode) {
+        const nytText = await nytimesPage.evaluate(() => document.body.innerText).catch(() => '');
+        const found = extractCodeFromText(nytText);
+        if (found) { giftCode = found; console.log('🎫 Extracted gift code from NY Times page'); }
+    }
+
     return nytimesPage;
 }
 
 async function ensureGiftCodeFilled(page) {
-    if (!GIFT_CODE) return;
+    if (!giftCode) return;
     const giftInput = await findFirstSelector(page, [
         'input[name="gift_code"]',
         'input#gift_code',
@@ -497,7 +560,7 @@ async function ensureGiftCodeFilled(page) {
     const currentValue = await page.evaluate(el => el.value, giftInput);
     if (currentValue && currentValue.trim().length > 0) return;
     await humanClick(page, giftInput);
-    await humanType(giftInput, GIFT_CODE);
+    await humanType(giftInput, giftCode);
 }
 
 // --------------------------------------------------------------------------
@@ -510,7 +573,7 @@ async function loadHistory() {
         return JSON.parse(data);
     } catch (_) {
         return {
-            currentCode: GIFT_CODE,
+            currentCode: giftCode || '',
             codeSetDate: new Date().toISOString(),
             attempts: []
         };
@@ -602,7 +665,7 @@ async function redeemSubscription() {
     const timestamp = new Date().toISOString();
     console.log(`\n${'='.repeat(60)}`);
     console.log(`🕐 Starting redemption: ${timestamp}`);
-    console.log(`🎫 Using code: ${GIFT_CODE.substring(0, 8)}...`);
+    console.log(giftCode ? `🎫 Using code: ${giftCode.substring(0, 8)}...` : '🎫 Gift code not yet known — will fetch from Fairview');
     console.log(`${'='.repeat(60)}\n`);
 
     let browser;
@@ -628,9 +691,18 @@ async function redeemSubscription() {
 
         const nytimesPage = await openNyTimesFromFairview(page, browser);
         if (!nytimesPage) {
-            await logAttempt(false, 'NYTIMES_LINK_FAILED', GIFT_CODE);
+            await logAttempt(false, 'NYTIMES_LINK_FAILED', giftCode);
             return false;
         }
+
+        if (!giftCode) {
+            console.error('❌ ERROR: Could not find gift code on Fairview site or NY Times page.');
+            console.error('   Set NYTIMES_GIFT_CODE in .env as a fallback, or check that the Fairview NYT page is accessible.');
+            await safeScreenshot(nytimesPage, 'no-gift-code.png');
+            await logAttempt(false, 'NO_GIFT_CODE', null);
+            return false;
+        }
+        console.log(`🎫 Gift code: ${giftCode.substring(0, 8)}...`);
 
         await ensureGiftCodeFilled(nytimesPage);
 
@@ -647,7 +719,7 @@ async function redeemSubscription() {
             console.error('🤖 NY Times thinks we are a bot.');
             console.error('   Try running `node redeem.js --manual-login` once to seed cookies and warm the profile.');
             await safeScreenshot(nytimesPage, 'bot-detected.png');
-            await logAttempt(false, 'BOT_DETECTED', GIFT_CODE);
+            await logAttempt(false, 'BOT_DETECTED', giftCode);
             return false;
         }
 
@@ -655,7 +727,7 @@ async function redeemSubscription() {
             console.error('❌ ERROR: Not authenticated.');
             console.error('   Run `node redeem.js --manual-login` to seed cookies, or provide library credentials.');
             await safeScreenshot(nytimesPage, 'login-required.png');
-            await logAttempt(false, 'AUTH_REQUIRED', GIFT_CODE);
+            await logAttempt(false, 'AUTH_REQUIRED', giftCode);
             return false;
         }
 
@@ -668,7 +740,7 @@ async function redeemSubscription() {
             console.error('❌ ERROR: Code appears to be invalid or expired!');
             console.error('🔄 Please update NYTIMES_GIFT_CODE in .env file');
             await safeScreenshot(nytimesPage, 'expired-code.png');
-            await logAttempt(false, 'CODE_EXPIRED', GIFT_CODE);
+            await logAttempt(false, 'CODE_EXPIRED', giftCode);
             return false;
         }
 
@@ -676,7 +748,7 @@ async function redeemSubscription() {
             console.log('ℹ️  Token already redeemed today');
             await safeScreenshot(nytimesPage, 'already-redeemed.png');
             await saveCookies(nytimesPage);
-            await logAttempt(true, 'ALREADY_REDEEMED', GIFT_CODE);
+            await logAttempt(true, 'ALREADY_REDEEMED', giftCode);
             return true;
         }
 
@@ -694,7 +766,7 @@ async function redeemSubscription() {
             console.error('❌ ERROR: Could not find redeem button');
             await safeScreenshot(nytimesPage, 'no-button.png');
             console.log('Page content preview:', pageContent.substring(0, 500));
-            await logAttempt(false, 'NO_BUTTON', GIFT_CODE);
+            await logAttempt(false, 'NO_BUTTON', giftCode);
             return false;
         }
 
@@ -705,7 +777,7 @@ async function redeemSubscription() {
         if (!await humanClick(nytimesPage, redeemElement)) {
             console.error('❌ ERROR: Redeem button not clickable');
             await safeScreenshot(nytimesPage, 'redeem-unclickable.png');
-            await logAttempt(false, 'REDEEM_UNCLICKABLE', GIFT_CODE);
+            await logAttempt(false, 'REDEEM_UNCLICKABLE', giftCode);
             return false;
         }
 
@@ -716,14 +788,14 @@ async function redeemSubscription() {
         if (resultContent.includes('access denied') || resultContent.includes('blocked') || resultContent.includes('robot')) {
             console.error('❌ ERROR: Bot detected after clicking button');
             await safeScreenshot(nytimesPage, 'bot-detected-after-click.png');
-            await logAttempt(false, 'BOT_DETECTED_AFTER_CLICK', GIFT_CODE);
+            await logAttempt(false, 'BOT_DETECTED_AFTER_CLICK', giftCode);
             return false;
         }
 
         if (resultContent.includes('invalid') || resultContent.includes('expired')) {
             console.error('❌ Code rejected after click - likely expired!');
             await safeScreenshot(nytimesPage, 'expired-code.png');
-            await logAttempt(false, 'CODE_EXPIRED_AFTER_CLICK', GIFT_CODE);
+            await logAttempt(false, 'CODE_EXPIRED_AFTER_CLICK', giftCode);
             return false;
         }
 
@@ -738,17 +810,17 @@ async function redeemSubscription() {
             console.log('✅ Redemption successful!');
             await safeScreenshot(nytimesPage, 'success.png');
             await saveCookies(nytimesPage);
-            await logAttempt(true, 'SUCCESS', GIFT_CODE);
+            await logAttempt(true, 'SUCCESS', giftCode);
             return true;
         }
 
         console.log('⚠️  Unclear result - check screenshot');
         await safeScreenshot(nytimesPage, 'unclear.png');
-        await logAttempt(false, 'UNCLEAR', GIFT_CODE);
+        await logAttempt(false, 'UNCLEAR', giftCode);
         return false;
     } catch (error) {
         console.error('💥 Error during redemption:', error.message);
-        await logAttempt(false, 'ERROR', GIFT_CODE);
+        await logAttempt(false, 'ERROR', giftCode);
         return false;
     } finally {
         if (browser) {
