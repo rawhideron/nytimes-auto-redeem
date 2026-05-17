@@ -1,3 +1,6 @@
-# Run at 6 AM ET daily (11 AM UTC, adjust based on DST)
-05 6 * * * cd /app && /usr/local/bin/node /app/redeem.js >> /var/log/cron.log 2>&1
-# Note: ET is UTC-5 (EST) or UTC-4 (EDT). Adjust the hour as needed.
+# Run at 6:05 AM local time daily. The TZ env var is exported into the cron
+# environment via /app/.env-cron (set up by the Dockerfile CMD), and we wrap
+# node in `xvfb-run` so real Chrome can launch a virtual display.
+SHELL=/bin/bash
+05 6 * * * . /app/.env-cron && cd /app && xvfb-run -a --server-args="-screen 0 1440x900x24" /usr/local/bin/node /app/redeem.js >> /var/log/cron.log 2>&1
+# Note: TZ is set via docker-compose (America/New_York), so 6:05 = ET, no DST math required.

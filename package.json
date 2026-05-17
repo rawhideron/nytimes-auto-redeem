@@ -1,12 +1,10 @@
 {
   "name": "nytimes-auto-redeem",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Automates Fairview Library NYTimes redemption flow",
   "main": "redeem.js",
   "dependencies": {
-    "puppeteer": "^24.35.0",
-    "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "puppeteer-real-browser": "^1.4.4"
   },
   "scripts": {
     "lint": "node --check redeem.js",
