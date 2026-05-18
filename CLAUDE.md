@@ -76,7 +76,7 @@ log is not encrypted.
 | `TZ` | No | `America/New_York` | Container/cron timezone |
 | `LOCALE` | No | `en-US` | Browser locale + Accept-Language |
 
-All variables are loaded from `.env` (gitignored) by docker-compose.
+All variables are loaded from `.env` (gitignored). Pass via `--env-file .env` when using `docker run`.
 
 ---
 
@@ -100,22 +100,61 @@ node redeem.js --history
 
 ## Docker workflow
 
+> **Important:** `docker-compose` v1 (the system package on some distros) is
+> incompatible with newer Docker daemons. Use `docker` CLI directly.
+
 ```bash
-docker-compose build
-docker-compose up -d
+# Build
+docker build -t nytimes-redeem .
 
-# Manual login to seed cookies (run once, then automated runs use saved session)
-docker-compose exec nytimes-redeem node redeem.js --manual-login
+# Start (cron fires at 6:05 AM ET daily)
+docker run -d \
+  --name nytimes-redeem \
+  --restart unless-stopped \
+  -e TZ=America/New_York \
+  --env-file .env \
+  -v "$(pwd)/cookies:/app/cookies" \
+  nytimes-redeem
 
-# Tail cron logs
-docker-compose exec nytimes-redeem tail -f /var/log/cron.log
+# Watch logs
+docker logs -f nytimes-redeem
 
-# Update the gift code in .env and optionally restart
-./update-code.sh
+# Manual test run — mirrors exactly what cron executes
+docker exec nytimes-redeem bash -c \
+  '. /app/.env-cron && xvfb-run -a --server-args="-screen 0 1440x900x24" node /app/redeem.js'
+
+# Stop / restart
+docker stop nytimes-redeem
+docker restart nytimes-redeem
 ```
 
 The Dockerfile CMD dumps all relevant env vars to `/app/.env-cron` at startup
 so the cron job (which runs in a sanitized environment) can source them.
+
+### First-time manual login (seed Chrome profile)
+
+`--manual-login` opens Chrome with **two tabs** — one for BCCLS, one for NYT —
+and requires X11 forwarding so the browser is visible. Run it once before the
+first automated run:
+
+```bash
+xhost +local:docker
+
+docker run --rm \
+  -e DISPLAY=:1 \
+  -e XAUTHORITY=/tmp/.Xauthority \
+  -e TZ=America/New_York \
+  --env-file .env \
+  --user "$(id -u):$(id -g)" \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -v "$XAUTHORITY:/tmp/.Xauthority:ro" \
+  -v "$(pwd)/cookies:/app/cookies" \
+  nytimes-redeem node redeem.js --manual-login
+```
+
+Complete both logins, then press **Ctrl+C** to save cookies from all relevant
+domains (`nytimes.com`, `myaccount.nytimes.com`, `catalog.bccls.org`,
+`fairviewlibrarynj.org`) into `cookies/nytimes-cookies.json`.
 
 ---
 
@@ -150,7 +189,7 @@ so the cron job (which runs in a sanitized environment) can source them.
 | `loadCookies(page)` | Load (and decrypt if needed) cookies from disk into page |
 | `saveCookies(page)` | Dump current page cookies to disk (encrypt if key set) |
 | `redeemSubscription()` | Main flow: launch → login → navigate → check → click → log |
-| `manualLogin()` | Interactive mode: open Chrome, wait for SIGINT, save cookies |
+| `manualLogin()` | Opens two tabs (BCCLS + NYT login); Ctrl+C saves cookies from all domains |
 | `showHistory()` | Print formatted history report |
 
 ---
@@ -186,3 +225,9 @@ Screenshots are saved to `cookies/` on any failure (and on success).
 - Do not set `headless: true` in `launchBrowser()` — NYT detects headless mode.
 - Do not apply stealth only to the first page; `targetcreated` must stay wired
   so new tabs (the NYT tab) also get the fingerprint patch.
+- Do not change `disableXvfb` in `manualLogin()` back to `false`. It must be
+  `true` so Chrome renders to the forwarded X11 display and the user can see it.
+  The automated flow (`launchBrowser`) correctly uses `disableXvfb: false` so
+  Xvfb is managed internally by the container.
+- Do not use `docker-compose` v1 — it is broken on this system. Use the `docker`
+  CLI directly as shown in the Docker workflow section.
