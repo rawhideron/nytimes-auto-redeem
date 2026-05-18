@@ -629,17 +629,14 @@ async function openNyTimesFromFairview(page, browser) {
 
     // Capture the new tab if the link opens one, OR the same-page navigation
     // if the link is in-tab.
+    // Inner timeout (30 s) is intentionally shorter than the outer race timeout
+    // (60 s) so newPagePromise always resolves before the fallback null fires.
     const newPagePromise = new Promise(resolve => {
         const handler = async (target) => {
             if (target.type() !== 'page') return;
             browser.off('targetcreated', handler);
             const newPage = await target.page();
-            // The browser-level targetcreated handler in launchBrowser() will
-            // have already applied stealth to it, but we wait for a load event
-            // before returning so the caller sees a ready page.
-            try {
-                await newPage.waitForNavigation({ waitUntil: 'networkidle2', timeout: 45000 }).catch(() => null);
-            } catch (_) {}
+            await newPage.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null);
             resolve(newPage);
         };
         browser.on('targetcreated', handler);
@@ -658,7 +655,7 @@ async function openNyTimesFromFairview(page, browser) {
     const nytimesPage = await Promise.race([
         newPagePromise,
         samePageNavPromise,
-        new Promise(r => setTimeout(() => r(null), 45000))
+        new Promise(r => setTimeout(() => r(null), 60000))
     ]);
 
     if (!nytimesPage) {
@@ -938,7 +935,23 @@ async function redeemSubscription() {
             return false;
         }
 
-        await randomDelay(4500, 7000);
+        // Wait for any post-click navigation to settle, then an extra pause for
+        // dynamic content. NYT's auth/redemption flow can involve multiple
+        // redirects that take several seconds to resolve.
+        await nytimesPage.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => null);
+        await randomDelay(3000, 5000);
+
+        // Poll until any visible loading spinner disappears (up to ~18 s extra).
+        for (let i = 0; i < 6; i++) {
+            const isLoading = await nytimesPage.evaluate(() => {
+                const spinners = document.querySelectorAll(
+                    '[class*="spinner"], [class*="loading"], [class*="progress"], svg[aria-label*="loading"]'
+                );
+                return spinners.length > 0;
+            }).catch(() => false);
+            if (!isLoading) break;
+            await randomDelay(2500, 3500);
+        }
 
         const resultContent = await nytimesPage.evaluate(() => document.body.innerText.toLowerCase());
 
