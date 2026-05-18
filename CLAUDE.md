@@ -63,6 +63,8 @@ log is not encrypted.
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `NYTIMES_GIFT_CODE` | No | auto-fetched from Fairview | Gift code fallback |
+| `NYTIMES_EMAIL` | No | — | NYT account email for automated login |
+| `NYTIMES_PASSWORD` | No | — | NYT account password for automated login |
 | `LIBRARY_CARD_NUMBER` | No | — | BCCLS patron card number |
 | `LIBRARY_PIN` | No | — | BCCLS patron PIN |
 | `COOKIE_ENCRYPTION_KEY` | No | — | Encrypts cookie file at rest |
@@ -138,6 +140,7 @@ so the cron job (which runs in a sanitized environment) can source them.
 | `safeScreenshot(page, filename)` | Best-effort screenshot to cookies/ |
 | `promptForLibraryCredentials()` | Readline prompt for card # and PIN |
 | `loginToLibrary(page, creds)` | Navigate to BCCLS and submit login form |
+| `loginToNyTimes(page)` | Navigate to NYT login, fill email + password, detect success |
 | `openNyTimesFromFairview(page, browser)` | Navigate Fairview home → click NYT link → return NYT page |
 | `ensureGiftCodeFilled(page)` | Fill gift code input if present and empty |
 | `loadHistory()` | Read redemption-history.json or return empty structure |

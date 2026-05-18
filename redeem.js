@@ -31,6 +31,8 @@ let giftCode = process.env.NYTIMES_GIFT_CODE || null;
 const COOKIE_ENCRYPTION_KEY = process.env.COOKIE_ENCRYPTION_KEY;
 const LIBRARY_CARD_NUMBER = process.env.LIBRARY_CARD_NUMBER;
 const LIBRARY_PIN = process.env.LIBRARY_PIN;
+const NYTIMES_EMAIL = process.env.NYTIMES_EMAIL;
+const NYTIMES_PASSWORD = process.env.NYTIMES_PASSWORD;
 const CHROME_EXECUTABLE_PATH = process.env.CHROME_EXECUTABLE_PATH;
 const LIBRARY_LOGIN_URL = process.env.LIBRARY_LOGIN_URL ||
     'https://catalog.bccls.org/polaris/logon.aspx?ctx=37.1033.0.0.6';
@@ -431,6 +433,79 @@ async function loginToLibrary(page, { cardNumber, pin }) {
 }
 
 // --------------------------------------------------------------------------
+// NY Times email/password login
+// --------------------------------------------------------------------------
+
+async function loginToNyTimes(page) {
+    console.log('🔑 Logging in to NY Times...');
+    await page.goto('https://myaccount.nytimes.com/auth/login', { waitUntil: 'networkidle2', timeout: 60000 });
+    await randomDelay(1500, 2800);
+
+    // If redirected away from the login page, session is already active.
+    if (!page.url().includes('/auth/login') && !page.url().includes('/login')) {
+        console.log('✅ Already logged in to NY Times');
+        return true;
+    }
+
+    // Step 1: email
+    const emailInput = await findFirstSelector(page, [
+        'input[name="email"]',
+        'input[type="email"]',
+        'input#email'
+    ]);
+    if (!emailInput) {
+        console.error('❌ ERROR: NYT email field not found');
+        await safeScreenshot(page, 'nyt-login-no-email.png');
+        return false;
+    }
+    await humanClick(page, emailInput);
+    await humanType(emailInput, NYTIMES_EMAIL);
+    await randomDelay(500, 900);
+
+    const continueBtn = await findButtonByText(page, ['continue', 'log in', 'sign in', 'next']);
+    if (continueBtn) {
+        await humanClick(page, continueBtn);
+    } else {
+        await emailInput.press('Enter');
+    }
+    await randomDelay(1500, 2500);
+
+    // Step 2: password (NYT shows it on the same page or a second step)
+    const passwordInput = await findFirstSelector(page, [
+        'input[type="password"]',
+        'input[name="password"]'
+    ], 8000);
+    if (!passwordInput) {
+        console.error('❌ ERROR: NYT password field not found — may need manual login');
+        await safeScreenshot(page, 'nyt-login-no-password.png');
+        return false;
+    }
+    await humanClick(page, passwordInput);
+    await humanType(passwordInput, NYTIMES_PASSWORD);
+    await randomDelay(500, 900);
+
+    const loginBtn = await findButtonByText(page, ['log in', 'sign in', 'continue', 'submit']);
+    const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null);
+    if (loginBtn) {
+        await humanClick(page, loginBtn);
+    } else {
+        await passwordInput.press('Enter');
+    }
+    await navPromise;
+    await randomDelay(1000, 2000);
+
+    const resultText = await page.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '');
+    if (resultText.includes('incorrect') || resultText.includes('invalid') || resultText.includes('wrong password')) {
+        console.error('❌ ERROR: NYT login failed — check NYTIMES_EMAIL / NYTIMES_PASSWORD');
+        await safeScreenshot(page, 'nyt-login-failed.png');
+        return false;
+    }
+
+    console.log('✅ NY Times login successful');
+    return true;
+}
+
+// --------------------------------------------------------------------------
 // Fairview -> NY Times navigation
 // --------------------------------------------------------------------------
 
@@ -714,6 +789,10 @@ async function redeemSubscription() {
             console.log('ℹ️  No library credentials provided. Attempting without login.');
         }
 
+        if (NYTIMES_EMAIL && NYTIMES_PASSWORD) {
+            await loginToNyTimes(page);
+        }
+
         console.log('🌐 Opening NY Times redemption from Fairview site...');
         await randomDelay(800, 2000);
 
@@ -752,11 +831,24 @@ async function redeemSubscription() {
         }
 
         if (pageContent.includes('log in') || pageContent.includes('sign in')) {
-            console.error('❌ ERROR: Not authenticated.');
-            console.error('   Run `node redeem.js --manual-login` to seed cookies, or provide library credentials.');
-            await safeScreenshot(nytimesPage, 'login-required.png');
-            await logAttempt(false, 'AUTH_REQUIRED', giftCode);
-            return false;
+            if (NYTIMES_EMAIL && NYTIMES_PASSWORD) {
+                console.log('⚠️  Session expired on NYT page. Re-logging in...');
+                const redemptionUrl = nytimesPage.url();
+                const loginOk = await loginToNyTimes(nytimesPage);
+                if (!loginOk) {
+                    await logAttempt(false, 'AUTH_REQUIRED', giftCode);
+                    return false;
+                }
+                // Navigate back to the redemption page now that we have a fresh session.
+                await nytimesPage.goto(redemptionUrl, { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => null);
+                await randomDelay(2000, 3000);
+            } else {
+                console.error('❌ ERROR: Not authenticated.');
+                console.error('   Set NYTIMES_EMAIL + NYTIMES_PASSWORD in .env, or run --manual-login.');
+                await safeScreenshot(nytimesPage, 'login-required.png');
+                await logAttempt(false, 'AUTH_REQUIRED', giftCode);
+                return false;
+            }
         }
 
         if (
@@ -880,7 +972,9 @@ async function manualLogin() {
         },
         connectOption: { defaultViewport: null },
         args: ['--no-sandbox', '--disable-setuid-sandbox', `--lang=${LOCALE}`, '--start-maximized'],
-        disableXvfb: false
+        // Manual login must be visible — let Chrome use the forwarded DISPLAY
+        // instead of its own internal Xvfb.
+        disableXvfb: true
     });
 
     browser.on('targetcreated', async (target) => {
