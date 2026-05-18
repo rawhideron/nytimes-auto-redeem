@@ -18,5 +18,9 @@
     "library"
   ],
   "author": "",
-  "license": "MIT"
+  "license": "MIT",
+  "overrides": {
+    "basic-ftp": ">=5.3.1",
+    "ip-address": ">=10.1.1"
+  }
 }
