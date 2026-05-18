@@ -108,10 +108,12 @@ async function humanClick(page, elementHandle) {
 
 async function humanType(elementHandle, text) {
     if (!elementHandle) return;
-    for (const ch of text) {
-        await elementHandle.type(ch, { delay: 0 });
-        await randomDelay(60, 180);
-    }
+    try {
+        for (const ch of text) {
+            await elementHandle.type(ch, { delay: 0 });
+            await randomDelay(60, 180);
+        }
+    } catch (_) { /* element went stale during navigation */ }
 }
 
 // --------------------------------------------------------------------------
@@ -316,11 +318,11 @@ async function findFirstSelector(page, selectors, timeoutMs = 4000) {
     for (const selector of selectors) {
         try {
             await page.waitForSelector(selector, { timeout: timeoutMs });
-        } catch (error) {
+            const handle = await page.$(selector);
+            if (handle) return handle;
+        } catch (_) {
             continue;
         }
-        const handle = await page.$(selector);
-        if (handle) return handle;
     }
     return null;
 }
@@ -406,7 +408,7 @@ async function loginToLibrary(page, { cardNumber, pin }) {
     await randomDelay(400, 900);
 
     const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null);
-    await pinInput.press('Enter');
+    await pinInput.press('Enter').catch(() => null);
     let navigated = await Promise.race([navPromise, new Promise(r => setTimeout(() => r(null), 1500))]);
 
     if (!navigated) {
@@ -425,7 +427,7 @@ async function loginToLibrary(page, { cardNumber, pin }) {
         navigated = await navAfterClick;
     }
 
-    const pageText = await page.evaluate(() => document.body.innerText.toLowerCase());
+    const pageText = await page.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '');
     if (pageText.includes('library card') && pageText.includes('password')) {
         console.warn('⚠️  Library login may have failed. Check credentials.');
     }
