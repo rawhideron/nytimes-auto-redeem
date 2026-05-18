@@ -433,75 +433,110 @@ async function loginToLibrary(page, { cardNumber, pin }) {
 }
 
 // --------------------------------------------------------------------------
-// NY Times email/password login
+// NY Times login — email/password with Google SSO fallback
 // --------------------------------------------------------------------------
 
 async function loginToNyTimes(page) {
     console.log('🔑 Logging in to NY Times...');
-    await page.goto('https://myaccount.nytimes.com/auth/login', { waitUntil: 'networkidle2', timeout: 60000 });
+    // Use the same URL the redemption page redirects to when not authenticated.
+    await page.goto('https://www.nytimes.com/login', { waitUntil: 'networkidle2', timeout: 60000 });
     await randomDelay(1500, 2800);
 
-    // If redirected away from the login page, session is already active.
-    if (!page.url().includes('/auth/login') && !page.url().includes('/login')) {
+    // A real authenticated session redirects away from /login entirely.
+    // Also check the page text — nyt-a is an anonymous tracking cookie that can
+    // cause a redirect without establishing a real account session.
+    const afterLoginUrl = page.url();
+    const afterLoginText = await page.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '');
+    const onLoginPage = afterLoginUrl.includes('/login') || afterLoginUrl.includes('/auth/')
+        || afterLoginText.includes('log in or create') || afterLoginText.includes('email address');
+    if (!onLoginPage) {
         console.log('✅ Already logged in to NY Times');
         return true;
     }
 
-    // Step 1: email
-    const emailInput = await findFirstSelector(page, [
-        'input[name="email"]',
-        'input[type="email"]',
-        'input#email'
-    ]);
-    if (!emailInput) {
-        console.error('❌ ERROR: NYT email field not found');
-        await safeScreenshot(page, 'nyt-login-no-email.png');
-        return false;
-    }
-    await humanClick(page, emailInput);
-    await humanType(emailInput, NYTIMES_EMAIL);
-    await randomDelay(500, 900);
+    // Try email/password if credentials are set and the email field is present.
+    if (NYTIMES_EMAIL && NYTIMES_PASSWORD) {
+        const emailInput = await findFirstSelector(page, [
+            'input[name="email"]',
+            'input[type="email"]',
+            'input#email'
+        ], 3000);
 
-    const continueBtn = await findButtonByText(page, ['continue', 'log in', 'sign in', 'next']);
-    if (continueBtn) {
-        await humanClick(page, continueBtn);
-    } else {
-        await emailInput.press('Enter');
-    }
-    await randomDelay(1500, 2500);
+        if (emailInput) {
+            await humanClick(page, emailInput);
+            await humanType(emailInput, NYTIMES_EMAIL);
+            await randomDelay(500, 900);
 
-    // Step 2: password (NYT shows it on the same page or a second step)
-    const passwordInput = await findFirstSelector(page, [
-        'input[type="password"]',
-        'input[name="password"]'
-    ], 8000);
-    if (!passwordInput) {
-        console.error('❌ ERROR: NYT password field not found — may need manual login');
-        await safeScreenshot(page, 'nyt-login-no-password.png');
-        return false;
-    }
-    await humanClick(page, passwordInput);
-    await humanType(passwordInput, NYTIMES_PASSWORD);
-    await randomDelay(500, 900);
+            const continueBtn = await findButtonByText(page, ['continue', 'next']);
+            if (continueBtn) {
+                await humanClick(page, continueBtn);
+            } else {
+                await emailInput.press('Enter');
+            }
+            await randomDelay(1500, 2500);
 
-    const loginBtn = await findButtonByText(page, ['log in', 'sign in', 'continue', 'submit']);
-    const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null);
-    if (loginBtn) {
-        await humanClick(page, loginBtn);
-    } else {
-        await passwordInput.press('Enter');
-    }
-    await navPromise;
-    await randomDelay(1000, 2000);
+            const passwordInput = await findFirstSelector(page, [
+                'input[type="password"]',
+                'input[name="password"]'
+            ], 6000);
 
-    const resultText = await page.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '');
-    if (resultText.includes('incorrect') || resultText.includes('invalid') || resultText.includes('wrong password')) {
-        console.error('❌ ERROR: NYT login failed — check NYTIMES_EMAIL / NYTIMES_PASSWORD');
+            if (passwordInput) {
+                await humanClick(page, passwordInput);
+                await humanType(passwordInput, NYTIMES_PASSWORD);
+                await randomDelay(500, 900);
+
+                const loginBtn = await findButtonByText(page, ['log in', 'sign in', 'continue', 'submit']);
+                const nav = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null);
+                if (loginBtn) {
+                    await humanClick(page, loginBtn);
+                } else {
+                    await passwordInput.press('Enter');
+                }
+                await nav;
+                await randomDelay(1000, 2000);
+
+                const t = await page.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '');
+                if (!t.includes('incorrect') && !t.includes('invalid') && !page.url().includes('/login')) {
+                    console.log('✅ NY Times login successful (email/password)');
+                    return true;
+                }
+                console.log('⚠️  Email/password did not work — trying Google SSO...');
+            }
+        }
+    }
+
+    // Fall back to Google SSO. Chrome already holds a Google session from the
+    // manual-login pass, so clicking the button completes silently without
+    // needing to enter any Google credentials.
+    const googleBtn = await findButtonByText(page, ['continue with google', 'google']);
+    if (!googleBtn) {
+        console.error('❌ ERROR: No login method available on NYT login page');
         await safeScreenshot(page, 'nyt-login-failed.png');
         return false;
     }
+    console.log('🔑 Using Google SSO...');
+    const ssoNav = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 }).catch(() => null);
+    await humanClick(page, googleBtn);
+    await ssoNav;
+    await randomDelay(2000, 4000);
 
-    console.log('✅ NY Times login successful');
+    // Google may show an account chooser — pick the matching account.
+    const chooserText = await page.evaluate(() => document.body.innerText).catch(() => '');
+    if (chooserText.toLowerCase().includes('choose an account') || chooserText.toLowerCase().includes('choose account')) {
+        const accountBtn = await findButtonByText(page, [NYTIMES_EMAIL, 'continue']);
+        if (accountBtn) {
+            await humanClick(page, accountBtn);
+            await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null);
+            await randomDelay(2000, 3000);
+        }
+    }
+
+    if (page.url().includes('/login') || page.url().includes('/auth/')) {
+        console.error('❌ ERROR: Google SSO did not complete NYT login');
+        await safeScreenshot(page, 'nyt-login-failed.png');
+        return false;
+    }
+    console.log('✅ NY Times login successful (Google SSO)');
     return true;
 }
 
@@ -917,6 +952,21 @@ async function redeemSubscription() {
             await safeScreenshot(nytimesPage, 'expired-code.png');
             await logAttempt(false, 'CODE_EXPIRED_AFTER_CLICK', giftCode);
             return false;
+        }
+
+        // REDEEM redirected to a login wall — log in on the current page and
+        // navigate back to the redemption URL to try again.
+        if (resultContent.includes('log in or create') || resultContent.includes('email address')) {
+            console.log('⚠️  REDEEM triggered login wall. Logging in and retrying...');
+            const redemptionUrl = nytimesPage.url();
+            const loginOk = await loginToNyTimes(nytimesPage);
+            if (!loginOk) {
+                await logAttempt(false, 'AUTH_REQUIRED', giftCode);
+                return false;
+            }
+            await nytimesPage.goto(redemptionUrl, { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => null);
+            await randomDelay(2000, 3000);
+            // Re-evaluate after re-auth; fall through to UNCLEAR if still ambiguous.
         }
 
         const isSuccess =
