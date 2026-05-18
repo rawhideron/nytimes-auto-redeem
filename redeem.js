@@ -446,7 +446,9 @@ async function openNyTimesFromFairview(page, browser) {
             const links = Array.from(document.querySelectorAll('a'));
             const link = links.find(l => {
                 const text = (l.textContent || '').toLowerCase();
-                return text.includes('ny times') || text.includes('nytimes') || text.includes('new york times');
+                const href = (l.href || '').toLowerCase();
+                return text.includes('ny times') || text.includes('nytimes') || text.includes('new york times') ||
+                       href.includes('nytimes.com');
             });
             if (link) return link.href;
             const img = Array.from(document.querySelectorAll('img')).find(i => {
@@ -466,21 +468,47 @@ async function openNyTimesFromFairview(page, browser) {
         if (found) { giftCode = found; console.log('🎫 Extracted gift code from Fairview page text'); }
     }
 
-    const nytimesLink = await page.evaluateHandle(() => {
+    const findNytLink = () => page.evaluateHandle(() => {
         const links = Array.from(document.querySelectorAll('a'));
-        const linkByText = links.find(link => {
+        return links.find(link => {
             const text = (link.textContent || '').toLowerCase();
-            return text.includes('ny times') || text.includes('nytimes') || text.includes('new york times');
-        });
-        if (linkByText) return linkByText;
-        const image = Array.from(document.querySelectorAll('img')).find(img => {
-            const alt = (img.getAttribute('alt') || '').toLowerCase();
-            return alt.includes('ny times') || alt.includes('nytimes') || alt.includes('new york times');
-        });
-        return image ? image.closest('a') : null;
+            const href = (link.href || '').toLowerCase();
+            return text.includes('ny times') || text.includes('nytimes') || text.includes('new york times') ||
+                   href.includes('nytimes.com');
+        }) ||
+        (() => {
+            const image = Array.from(document.querySelectorAll('img')).find(img => {
+                const alt = (img.getAttribute('alt') || '').toLowerCase();
+                return alt.includes('ny times') || alt.includes('nytimes') || alt.includes('new york times');
+            });
+            return image ? image.closest('a') : null;
+        })() || null;
     });
 
-    const linkElement = nytimesLink.asElement();
+    let nytimesLink = await findNytLink();
+    let linkElement = nytimesLink.asElement();
+
+    // Not found on the home page — try navigating into the "Online" section.
+    if (!linkElement) {
+        console.log('🔎 NY Times link not on home page, checking Online/Services nav...');
+        const onlineNavLink = await page.evaluateHandle(() => {
+            const links = Array.from(document.querySelectorAll('a'));
+            return links.find(link => {
+                const text = (link.textContent || '').trim().toLowerCase();
+                return text === 'online' || text === 'digital resources' || text === 'e-resources' ||
+                       text === 'online resources' || text === 'databases';
+            }) || null;
+        });
+        const onlineEl = onlineNavLink.asElement();
+        if (onlineEl) {
+            await humanClick(page, onlineEl);
+            await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null);
+            await randomDelay(1500, 3000);
+            nytimesLink = await findNytLink();
+            linkElement = nytimesLink.asElement();
+        }
+    }
+
     if (!linkElement) {
         console.error('❌ ERROR: Could not find NY Times link on Fairview site.');
         await safeScreenshot(page, 'fairview-no-nytimes.png');
@@ -586,7 +614,7 @@ async function saveHistory(history) {
 
 async function logAttempt(success, status, codeUsed) {
     const history = await loadHistory();
-    if (codeUsed !== history.currentCode) {
+    if (codeUsed && codeUsed !== history.currentCode) {
         console.log(`📝 New code detected: ${codeUsed.substring(0, 8)}...`);
         if (history.codeSetDate && history.attempts.length > 0) {
             const days = Math.floor((new Date() - new Date(history.codeSetDate)) / (1000 * 60 * 60 * 24));
@@ -837,9 +865,11 @@ async function redeemSubscription() {
 
 async function manualLogin() {
     console.log('\n=== Manual Login Mode ===');
-    console.log('A real Chrome window will open to the Fairview/BCCLS login page.');
-    console.log('Log in, then go to the Fairview site and click the NY Times icon.');
-    console.log('Once the NY Times redemption page is open, press Ctrl+C to save cookies.\n');
+    console.log('Two tabs will open:');
+    console.log('  Tab 1 — Fairview/BCCLS: log in with your library card, then');
+    console.log('           navigate to the Fairview site and click the NY Times icon.');
+    console.log('  Tab 2 — NY Times: log in to (or create) your NYT account.');
+    console.log('Complete both logins, then press Ctrl+C to save cookies.\n');
 
     const { browser, page } = await connect({
         headless: false,
@@ -853,25 +883,41 @@ async function manualLogin() {
         disableXvfb: false
     });
 
-    let activePage = page;
     browser.on('targetcreated', async (target) => {
         try {
             if (target.type() !== 'page') return;
             const newPage = await target.page();
-            if (newPage) {
-                await applyStealthToPage(newPage);
-                activePage = newPage;
-            }
+            if (newPage) await applyStealthToPage(newPage);
         } catch (_) {}
     });
 
     await applyStealthToPage(page);
     await page.goto(LIBRARY_LOGIN_URL);
 
+    // Open NY Times login in a second tab so both sessions can be established
+    // in one manual-login pass.
+    const nytPage = await browser.newPage();
+    await applyStealthToPage(nytPage);
+    await nytPage.goto('https://myaccount.nytimes.com/auth/login');
+
     await new Promise(() => {
         process.on('SIGINT', async () => {
             console.log('\nSaving cookies...');
-            try { await saveCookies(activePage); } catch (e) { console.error(e); }
+            try {
+                // Collect cookies from all relevant domains so the automated
+                // run starts with both the library session and the NYT account
+                // session already established.
+                const allCookies = await page.cookies(
+                    'https://www.nytimes.com',
+                    'https://myaccount.nytimes.com',
+                    'https://catalog.bccls.org',
+                    'https://fairviewlibrarynj.org'
+                );
+                const json = JSON.stringify(allCookies, null, 2);
+                const payload = encryptString(json);
+                await fs.writeFile(COOKIES_PATH, payload);
+                console.log(`Saved cookies${hasCookieEncryptionKey() ? ' (encrypted)' : ''}`);
+            } catch (e) { console.error(e); }
             try { await browser.close(); } catch (_) {}
             console.log('Cookies saved! You can now run the automated script.');
             process.exit(0);
