@@ -370,7 +370,9 @@ async function loginToLibrary(page, { cardNumber, pin }) {
     await page.goto(LIBRARY_LOGIN_URL, { waitUntil: 'networkidle2', timeout: 60000 });
     await randomDelay(1500, 2800); // simulate landing-page glance
 
-    const alreadyLoggedIn = await findFirstSelector(page, ['a[href*="logout"]', 'a[href*="logoff"]', '.logout', '#logout'], 2000);
+    const alreadyLoggedIn = await page.evaluate(() =>
+        /log\s*out|sign\s*out/i.test(document.body.innerText)
+    ).catch(() => false);
     if (alreadyLoggedIn) {
         console.log('✅ Library session already active (cookies valid)');
         return true;
@@ -632,6 +634,20 @@ async function openNyTimesFromFairview(page, browser) {
         await safeScreenshot(page, 'fairview-no-nytimes.png');
         return null;
     }
+
+    // Dismiss any popup/modal overlay (e.g. calendar event popups) that could
+    // intercept the click on the NYT tile.
+    await page.evaluate(() => {
+        const overlaySelectors = [
+            '[class*="modal"]', '[class*="popup"]', '[class*="overlay"]',
+            '[class*="dialog"]', '[role="dialog"]', '[aria-modal="true"]'
+        ];
+        for (const sel of overlaySelectors) {
+            document.querySelectorAll(sel).forEach(el => {
+                if (el.offsetParent !== null) el.style.display = 'none';
+            });
+        }
+    }).catch(() => null);
 
     // Capture the new tab if the link opens one, OR the same-page navigation
     // if the link is in-tab.
