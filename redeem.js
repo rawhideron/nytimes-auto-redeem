@@ -370,6 +370,12 @@ async function loginToLibrary(page, { cardNumber, pin }) {
     await page.goto(LIBRARY_LOGIN_URL, { waitUntil: 'networkidle2', timeout: 60000 });
     await randomDelay(1500, 2800); // simulate landing-page glance
 
+    const alreadyLoggedIn = await findFirstSelector(page, ['a[href*="logout"]', 'a[href*="logoff"]', '.logout', '#logout'], 2000);
+    if (alreadyLoggedIn) {
+        console.log('✅ Library session already active (cookies valid)');
+        return true;
+    }
+
     const cardInput = await findFirstSelector(page, [
         'input[name="barcode"]',
         'input#barcode',
