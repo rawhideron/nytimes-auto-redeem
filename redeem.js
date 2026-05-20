@@ -634,9 +634,10 @@ async function openNyTimesFromFairview(page, browser) {
     const newPagePromise = new Promise(resolve => {
         const handler = async (target) => {
             if (target.type() !== 'page') return;
-            browser.off('targetcreated', handler);
             const newPage = await target.page();
-            await newPage.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null);
+            if (!newPage) return; // tab not ready yet — keep handler registered
+            browser.off('targetcreated', handler);
+            await newPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => null);
             resolve(newPage);
         };
         browser.on('targetcreated', handler);
