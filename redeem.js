@@ -270,6 +270,12 @@ async function launchBrowser({ headless = false } = {}) {
     await fs.mkdir(USER_DATA_DIR, { recursive: true }).catch(() => null);
     await fs.mkdir(SCREENSHOT_DIR, { recursive: true }).catch(() => null);
 
+    // Remove stale Chrome singleton files left behind by a crashed previous run.
+    // Without this, Chrome refuses to start when the lock points to a dead PID.
+    for (const f of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+        await fs.unlink(path.join(USER_DATA_DIR, f)).catch(() => null);
+    }
+
     const { browser, page } = await connect({
         headless,
         turnstile: true,
@@ -640,7 +646,8 @@ async function openNyTimesFromFairview(page, browser) {
     await page.evaluate(() => {
         const overlaySelectors = [
             '[class*="modal"]', '[class*="popup"]', '[class*="overlay"]',
-            '[class*="dialog"]', '[role="dialog"]', '[aria-modal="true"]'
+            '[class*="dialog"]', '[role="dialog"]', '[aria-modal="true"]',
+            '[class*="fc-"]', '[class*="backdrop"]', '[class*="event-popup"]'
         ];
         for (const sel of overlaySelectors) {
             document.querySelectorAll(sel).forEach(el => {
@@ -648,6 +655,10 @@ async function openNyTimesFromFairview(page, browser) {
             });
         }
     }).catch(() => null);
+    // Escape dismisses any keyboard-dismissible popup (e.g. calendar overlays
+    // that don't match the CSS selectors above, common on holiday/event pages).
+    await page.keyboard.press('Escape').catch(() => null);
+    await randomDelay(200, 400);
 
     // Capture the new tab if the link opens one, OR the same-page navigation
     // if the link is in-tab.
@@ -669,6 +680,7 @@ async function openNyTimesFromFairview(page, browser) {
         .then(() => page)
         .catch(() => null);
 
+    await page.keyboard.press('Escape').catch(() => null);
     if (!await humanClick(page, linkElement)) {
         console.error('❌ ERROR: NY Times link not clickable.');
         await safeScreenshot(page, 'fairview-nytimes-unclickable.png');
@@ -692,6 +704,10 @@ async function openNyTimesFromFairview(page, browser) {
     await applyStealthToPage(nytimesPage);
     await nytimesPage.bringToFront();
     await randomDelay(2000, 4000);
+    // Wait for the NYT page to finish loading — domcontentloaded (used in
+    // newPagePromise) fires before JS-rendered content settles, which caused the
+    // UNCLEAR spinner on slow days. 15 s cap so we don't stall indefinitely.
+    await nytimesPage.waitForNetworkIdle({ timeout: 15000 }).catch(() => null);
 
     // Try to extract the gift code from the NYT page URL or visible content.
     if (!giftCode) {
