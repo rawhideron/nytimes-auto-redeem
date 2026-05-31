@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:24-slim
 
 # Install real Google Chrome (NOT Chromium) plus Xvfb so we can run headful
 # inside the container — headful real Chrome is dramatically harder for NY

@@ -980,19 +980,15 @@ async function redeemSubscription() {
         await nytimesPage.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => null);
         await randomDelay(3000, 5000);
 
-        // Poll until any visible loading spinner disappears (up to ~18 s extra).
-        for (let i = 0; i < 6; i++) {
-            const isLoading = await nytimesPage.evaluate(() => {
-                const spinners = document.querySelectorAll(
-                    '[class*="spinner"], [class*="loading"], [class*="progress"], svg[aria-label*="loading"]'
-                );
-                return spinners.length > 0;
-            }).catch(() => false);
-            if (!isLoading) break;
-            await randomDelay(2500, 3500);
+        // Wait until the page has meaningful content (up to ~30 s). NYT uses
+        // obfuscated class names so spinner selectors are unreliable; polling
+        // innerText length is simpler and catches any loading state.
+        let resultContent = '';
+        for (let i = 0; i < 12; i++) {
+            resultContent = await nytimesPage.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '');
+            if (resultContent.trim().length > 20) break;
+            await randomDelay(2000, 3000);
         }
-
-        const resultContent = await nytimesPage.evaluate(() => document.body.innerText.toLowerCase());
 
         if (resultContent.includes('access denied') || resultContent.includes('blocked') || resultContent.includes('robot')) {
             console.error('❌ ERROR: Bot detected after clicking button');
