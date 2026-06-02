@@ -14,7 +14,7 @@ inside Docker.
 
 ```
 redeem.js            Main script — entire automation in one file
-Dockerfile           Node 20-slim + real Google Chrome + Xvfb + cron
+Dockerfile           Node 24-slim + real Google Chrome + Xvfb + cron
 docker-compose.yml   Runs the container; mounts ./cookies as a volume
 crontab              Fires redeem.js at 06:05 ET daily via xvfb-run
 update-code.sh       Interactive helper to update NYTIMES_GIFT_CODE in .env
