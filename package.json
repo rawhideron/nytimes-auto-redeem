@@ -18,6 +18,9 @@
     "library"
   ],
   "author": "",
+  "engines": {
+    "node": ">=24"
+  },
   "license": "MIT",
   "overrides": {
     "basic-ftp": ">=5.3.1",

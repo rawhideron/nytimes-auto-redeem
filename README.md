@@ -223,7 +223,7 @@ node redeem.js
 ## Files at a glance
 
 - `redeem.js`: main automation script and all helper functions.
-- `Dockerfile`: Node 20-slim + real Google Chrome + Xvfb + cron.
+- `Dockerfile`: Node 24-slim + real Google Chrome + Xvfb + cron.
 - `docker-compose.yml`: reference compose config (use `docker` CLI directly if compose v1 is broken).
 - `crontab`: daily schedule — fires `redeem.js` at 06:05 ET via `xvfb-run`.
 - `update-code.sh`: helper to update `NYTIMES_GIFT_CODE` in `.env`.
