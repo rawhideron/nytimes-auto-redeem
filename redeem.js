@@ -651,7 +651,12 @@ async function openNyTimesFromFairview(page, browser) {
         ];
         for (const sel of overlaySelectors) {
             document.querySelectorAll(sel).forEach(el => {
-                if (el.offsetParent !== null) el.style.display = 'none';
+                const cs = window.getComputedStyle(el);
+                // offsetParent is always null for position:fixed even when visible,
+                // so check separately; skip only if pointer-events:none (won't intercept).
+                const isInteractable = el.offsetParent !== null ||
+                    (cs.position === 'fixed' && cs.pointerEvents !== 'none');
+                if (isInteractable) el.style.display = 'none';
             });
         }
     }).catch(() => null);
@@ -687,16 +692,41 @@ async function openNyTimesFromFairview(page, browser) {
         return null;
     }
 
-    const nytimesPage = await Promise.race([
+    let nytimesPage = await Promise.race([
         newPagePromise,
         samePageNavPromise,
         new Promise(r => setTimeout(() => r(null), 60000))
     ]);
 
     if (!nytimesPage) {
-        console.error('❌ ERROR: NY Times redemption page did not open.');
-        await safeScreenshot(page, 'fairview-nytimes-timeout.png');
-        return null;
+        // Coordinate-based click may have been absorbed by a fixed-position overlay.
+        // JS-dispatched click bypasses hit-testing entirely.
+        console.log('⚠️  No navigation after click — retrying with JS dispatch...');
+        const newPagePromise2 = new Promise(resolve => {
+            const handler = async (target) => {
+                if (target.type() !== 'page') return;
+                const newPage = await target.page();
+                if (!newPage) return;
+                browser.off('targetcreated', handler);
+                await newPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null);
+                resolve(newPage);
+            };
+            browser.on('targetcreated', handler);
+        });
+        const samePageNavPromise2 = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 })
+            .then(() => page)
+            .catch(() => null);
+        await linkElement.evaluate(el => el.click()).catch(() => null);
+        nytimesPage = await Promise.race([
+            newPagePromise2,
+            samePageNavPromise2,
+            new Promise(r => setTimeout(() => r(null), 20000))
+        ]);
+        if (!nytimesPage) {
+            console.error('❌ ERROR: NY Times redemption page did not open.');
+            await safeScreenshot(page, 'fairview-nytimes-timeout.png');
+            return null;
+        }
     }
 
     // Defensive re-application of stealth in case this page was created
