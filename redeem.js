@@ -641,91 +641,114 @@ async function openNyTimesFromFairview(page, browser) {
         return null;
     }
 
-    // Dismiss any popup/modal overlay (e.g. calendar event popups) that could
-    // intercept the click on the NYT tile.
-    await page.evaluate(() => {
-        const overlaySelectors = [
-            '[class*="modal"]', '[class*="popup"]', '[class*="overlay"]',
-            '[class*="dialog"]', '[role="dialog"]', '[aria-modal="true"]',
-            '[class*="fc-"]', '[class*="backdrop"]', '[class*="event-popup"]'
-        ];
-        for (const sel of overlaySelectors) {
-            document.querySelectorAll(sel).forEach(el => {
-                const cs = window.getComputedStyle(el);
-                // offsetParent is always null for position:fixed even when visible,
-                // so check separately; skip only if pointer-events:none (won't intercept).
-                const isInteractable = el.offsetParent !== null ||
-                    (cs.position === 'fixed' && cs.pointerEvents !== 'none');
-                if (isInteractable) el.style.display = 'none';
-            });
+    // Prefer navigating directly to the tile's href over clicking it. The
+    // Fairview "Online" page has a buggy ad/tracking script tied to a
+    // neighboring resource card (Zinio) that fires once that part of the
+    // page scrolls into view and floods the browser with popups to that
+    // card's URL — this swallows clicks aimed at the NY Times tile right
+    // next to it, so the click-based flow reliably times out. We already
+    // have the real href in hand, so skip the click entirely.
+    let nytimesPage = null;
+    const directHref = await linkElement.evaluate(el => el.href).catch(() => null);
+    if (directHref && /^https?:\/\//i.test(directHref)) {
+        nytimesPage = await browser.newPage();
+        await nytimesPage.goto(directHref, { waitUntil: 'domcontentloaded', timeout: 45000, referer: page.url() }).catch(() => null);
+        if (!nytimesPage.url() || nytimesPage.url() === 'about:blank') {
+            await nytimesPage.close().catch(() => null);
+            nytimesPage = null;
         }
-    }).catch(() => null);
-    // Escape dismisses any keyboard-dismissible popup (e.g. calendar overlays
-    // that don't match the CSS selectors above, common on holiday/event pages).
-    await page.keyboard.press('Escape').catch(() => null);
-    await randomDelay(200, 400);
-
-    // Capture the new tab if the link opens one, OR the same-page navigation
-    // if the link is in-tab.
-    // Inner timeout (30 s) is intentionally shorter than the outer race timeout
-    // (60 s) so newPagePromise always resolves before the fallback null fires.
-    const newPagePromise = new Promise(resolve => {
-        const handler = async (target) => {
-            if (target.type() !== 'page') return;
-            const newPage = await target.page();
-            if (!newPage) return; // tab not ready yet — keep handler registered
-            browser.off('targetcreated', handler);
-            await newPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => null);
-            resolve(newPage);
-        };
-        browser.on('targetcreated', handler);
-    });
-
-    const samePageNavPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 })
-        .then(() => page)
-        .catch(() => null);
-
-    await page.keyboard.press('Escape').catch(() => null);
-    if (!await humanClick(page, linkElement)) {
-        console.error('❌ ERROR: NY Times link not clickable.');
-        await safeScreenshot(page, 'fairview-nytimes-unclickable.png');
-        return null;
     }
 
-    let nytimesPage = await Promise.race([
-        newPagePromise,
-        samePageNavPromise,
-        new Promise(r => setTimeout(() => r(null), 60000))
-    ]);
-
     if (!nytimesPage) {
-        // Coordinate-based click may have been absorbed by a fixed-position overlay.
-        // JS-dispatched click bypasses hit-testing entirely.
-        console.log('⚠️  No navigation after click — retrying with JS dispatch...');
-        const newPagePromise2 = new Promise(resolve => {
+        // Fallback: click-based flow, kept in case the href can't be read directly.
+        console.log('⚠️  Could not navigate directly via href — falling back to clicking the tile...');
+
+        // Dismiss any popup/modal overlay (e.g. calendar event popups) that could
+        // intercept the click on the NYT tile.
+        await page.evaluate(() => {
+            const overlaySelectors = [
+                '[class*="modal"]', '[class*="popup"]', '[class*="overlay"]',
+                '[class*="dialog"]', '[role="dialog"]', '[aria-modal="true"]',
+                '[class*="fc-"]', '[class*="backdrop"]', '[class*="event-popup"]'
+            ];
+            for (const sel of overlaySelectors) {
+                document.querySelectorAll(sel).forEach(el => {
+                    const cs = window.getComputedStyle(el);
+                    // offsetParent is always null for position:fixed even when visible,
+                    // so check separately; skip only if pointer-events:none (won't intercept).
+                    const isInteractable = el.offsetParent !== null ||
+                        (cs.position === 'fixed' && cs.pointerEvents !== 'none');
+                    if (isInteractable) el.style.display = 'none';
+                });
+            }
+        }).catch(() => null);
+        // Escape dismisses any keyboard-dismissible popup (e.g. calendar overlays
+        // that don't match the CSS selectors above, common on holiday/event pages).
+        await page.keyboard.press('Escape').catch(() => null);
+        await randomDelay(200, 400);
+
+        // Capture the new tab if the link opens one, OR the same-page navigation
+        // if the link is in-tab.
+        // Inner timeout (30 s) is intentionally shorter than the outer race timeout
+        // (60 s) so newPagePromise always resolves before the fallback null fires.
+        const newPagePromise = new Promise(resolve => {
             const handler = async (target) => {
                 if (target.type() !== 'page') return;
                 const newPage = await target.page();
-                if (!newPage) return;
+                if (!newPage) return; // tab not ready yet — keep handler registered
                 browser.off('targetcreated', handler);
-                await newPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null);
+                await newPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => null);
                 resolve(newPage);
             };
             browser.on('targetcreated', handler);
         });
-        const samePageNavPromise2 = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 })
+
+        const samePageNavPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 })
             .then(() => page)
             .catch(() => null);
-        await linkElement.evaluate(el => el.click()).catch(() => null);
-        nytimesPage = await Promise.race([
-            newPagePromise2,
-            samePageNavPromise2,
-            new Promise(r => setTimeout(() => r(null), 20000))
-        ]);
-        if (!nytimesPage) {
-            console.error('❌ ERROR: NY Times redemption page did not open.');
-            await safeScreenshot(page, 'fairview-nytimes-timeout.png');
+
+        await page.keyboard.press('Escape').catch(() => null);
+        if (!await humanClick(page, linkElement)) {
+            console.error('❌ ERROR: NY Times link not clickable.');
+            await safeScreenshot(page, 'fairview-nytimes-unclickable.png');
             return null;
+        }
+
+        nytimesPage = await Promise.race([
+            newPagePromise,
+            samePageNavPromise,
+            new Promise(r => setTimeout(() => r(null), 60000))
+        ]);
+
+        if (!nytimesPage) {
+            // Coordinate-based click may have been absorbed by a fixed-position overlay.
+            // JS-dispatched click bypasses hit-testing entirely.
+            console.log('⚠️  No navigation after click — retrying with JS dispatch...');
+            const newPagePromise2 = new Promise(resolve => {
+                const handler = async (target) => {
+                    if (target.type() !== 'page') return;
+                    const newPage = await target.page();
+                    if (!newPage) return;
+                    browser.off('targetcreated', handler);
+                    await newPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null);
+                    resolve(newPage);
+                };
+                browser.on('targetcreated', handler);
+            });
+            const samePageNavPromise2 = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 })
+                .then(() => page)
+                .catch(() => null);
+            await linkElement.evaluate(el => el.click()).catch(() => null);
+            nytimesPage = await Promise.race([
+                newPagePromise2,
+                samePageNavPromise2,
+                new Promise(r => setTimeout(() => r(null), 20000))
+            ]);
+            if (!nytimesPage) {
+                console.error('❌ ERROR: NY Times redemption page did not open.');
+                await safeScreenshot(page, 'fairview-nytimes-timeout.png');
+                return null;
+            }
         }
     }
 
