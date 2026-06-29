@@ -653,7 +653,7 @@ async function openNyTimesFromFairview(page, browser) {
     if (directHref && /^https?:\/\//i.test(directHref)) {
         nytimesPage = await browser.newPage();
         await nytimesPage.goto(directHref, { waitUntil: 'domcontentloaded', timeout: 45000, referer: page.url() }).catch(() => null);
-        if (!nytimesPage.url() || nytimesPage.url() === 'about:blank') {
+        if (!nytimesPage.url().includes('nytimes.com')) {
             await nytimesPage.close().catch(() => null);
             nytimesPage = null;
         }
@@ -697,7 +697,6 @@ async function openNyTimesFromFairview(page, browser) {
                 const newPage = await target.page();
                 if (!newPage) return; // tab not ready yet — keep handler registered
                 browser.off('targetcreated', handler);
-                await newPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => null);
                 resolve(newPage);
             };
             browser.on('targetcreated', handler);
@@ -730,7 +729,6 @@ async function openNyTimesFromFairview(page, browser) {
                     const newPage = await target.page();
                     if (!newPage) return;
                     browser.off('targetcreated', handler);
-                    await newPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null);
                     resolve(newPage);
                 };
                 browser.on('targetcreated', handler);
