@@ -36,7 +36,7 @@ const NYTIMES_PASSWORD = process.env.NYTIMES_PASSWORD;
 const CHROME_EXECUTABLE_PATH = process.env.CHROME_EXECUTABLE_PATH;
 const LIBRARY_LOGIN_URL = process.env.LIBRARY_LOGIN_URL ||
     'https://catalog.bccls.org/polaris/logon.aspx?ctx=37.1033.0.0.6';
-const FAIRVIEW_HOME_URL = process.env.FAIRVIEW_HOME_URL || 'https://fairviewlibrarynj.org/en/';
+const FAIRVIEW_HOME_URL = process.env.FAIRVIEW_HOME_URL || 'https://fairviewlibrarynj.org/';
 const TIMEZONE = process.env.TZ || 'America/New_York';
 const LOCALE = process.env.LOCALE || 'en-US';
 
