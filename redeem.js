@@ -1070,12 +1070,30 @@ async function redeemSubscription() {
             // Re-evaluate after re-auth; fall through to UNCLEAR if still ambiguous.
         }
 
-        const isSuccess =
+        let isSuccess =
             resultContent.includes('success') ||
             resultContent.includes('redeemed') ||
             resultContent.includes('activated') ||
             resultContent.includes('thank you') ||
             resultContent.includes('welcome');
+
+        // NYT's redemption confirmation occasionally renders a generic transient
+        // error ("We're having a technical issue...") even though the redemption
+        // already went through server-side — confirmed by access being active on
+        // the account despite the script logging UNCLEAR. A reload reliably shows
+        // the real confirmation page when this happens.
+        if (!isSuccess && (resultContent.includes('technical issue') || resultContent.includes('try again soon'))) {
+            console.log('⚠️  Transient NYT error page — reloading to check real state...');
+            await nytimesPage.reload({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null);
+            await randomDelay(2000, 4000);
+            resultContent = await nytimesPage.evaluate(() => document.body.innerText.toLowerCase()).catch(() => resultContent);
+            isSuccess =
+                resultContent.includes('success') ||
+                resultContent.includes('redeemed') ||
+                resultContent.includes('activated') ||
+                resultContent.includes('thank you') ||
+                resultContent.includes('welcome');
+        }
 
         if (isSuccess) {
             console.log('✅ Redemption successful!');
