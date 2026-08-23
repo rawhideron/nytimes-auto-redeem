@@ -1031,13 +1031,20 @@ async function redeemSubscription() {
         await nytimesPage.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => null);
         await randomDelay(3000, 5000);
 
-        // Wait until the page has meaningful content (up to ~30 s). NYT uses
-        // obfuscated class names so spinner selectors are unreliable; polling
-        // innerText length is simpler and catches any loading state.
+        // Wait until the page shows a recognizable result (up to ~30 s). NYT's
+        // header/footer chrome renders immediately and already exceeds any
+        // short body-text-length threshold, so waiting for "any content" was
+        // capturing the page mid-spinner before the real result loaded —
+        // poll for an actual success/failure signal instead.
+        const SUCCESS_SIGNALS = ['success', 'redeemed', 'activated', 'thank you', 'welcome'];
+        const FAILURE_SIGNALS = ['access denied', 'blocked', 'robot', 'invalid', 'expired',
+            'log in or create', 'email address', 'technical issue', 'try again soon'];
+        const includesAny = (text, signals) => signals.some(s => text.includes(s));
+
         let resultContent = '';
         for (let i = 0; i < 12; i++) {
             resultContent = await nytimesPage.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '');
-            if (resultContent.trim().length > 20) break;
+            if (includesAny(resultContent, SUCCESS_SIGNALS) || includesAny(resultContent, FAILURE_SIGNALS)) break;
             await randomDelay(2000, 3000);
         }
 
@@ -1070,29 +1077,22 @@ async function redeemSubscription() {
             // Re-evaluate after re-auth; fall through to UNCLEAR if still ambiguous.
         }
 
-        let isSuccess =
-            resultContent.includes('success') ||
-            resultContent.includes('redeemed') ||
-            resultContent.includes('activated') ||
-            resultContent.includes('thank you') ||
-            resultContent.includes('welcome');
+        let isSuccess = includesAny(resultContent, SUCCESS_SIGNALS);
 
-        // NYT's redemption confirmation occasionally renders a generic transient
-        // error ("We're having a technical issue...") even though the redemption
-        // already went through server-side — confirmed by access being active on
-        // the account despite the script logging UNCLEAR. A reload reliably shows
-        // the real confirmation page when this happens.
-        if (!isSuccess && (resultContent.includes('technical issue') || resultContent.includes('try again soon'))) {
-            console.log('⚠️  Transient NYT error page — reloading to check real state...');
+        // NYT's redemption confirmation occasionally renders a transient error
+        // page (wording varies — a "technical issue" message, or just a generic
+        // spinner/"Troubleshooting Guide" error screen) even though the
+        // redemption already went through server-side — confirmed by access
+        // being active on the account despite the script logging UNCLEAR. A
+        // reload reliably shows the real confirmation page when this happens,
+        // so retry once on ANY ambiguous (non-success) result rather than only
+        // known error wording.
+        if (!isSuccess) {
+            console.log('⚠️  Ambiguous result after redeem click — reloading to check real state...');
             await nytimesPage.reload({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null);
             await randomDelay(2000, 4000);
             resultContent = await nytimesPage.evaluate(() => document.body.innerText.toLowerCase()).catch(() => resultContent);
-            isSuccess =
-                resultContent.includes('success') ||
-                resultContent.includes('redeemed') ||
-                resultContent.includes('activated') ||
-                resultContent.includes('thank you') ||
-                resultContent.includes('welcome');
+            isSuccess = includesAny(resultContent, SUCCESS_SIGNALS);
         }
 
         if (isSuccess) {
