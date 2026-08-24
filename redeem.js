@@ -1085,10 +1085,11 @@ async function redeemSubscription() {
         // redemption already went through server-side — confirmed by access
         // being active on the account despite the script logging UNCLEAR. A
         // reload reliably shows the real confirmation page when this happens,
-        // so retry once on ANY ambiguous (non-success) result rather than only
-        // known error wording.
-        if (!isSuccess) {
-            console.log('⚠️  Ambiguous result after redeem click — reloading to check real state...');
+        // but the transient error can persist across more than one reload
+        // (seen 2026-08-24), so retry a few times on ANY ambiguous (non-success)
+        // result rather than only known error wording.
+        for (let attempt = 0; !isSuccess && attempt < 3; attempt++) {
+            console.log(`⚠️  Ambiguous result after redeem click — reloading to check real state... (attempt ${attempt + 1}/3)`);
             await nytimesPage.reload({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null);
             await randomDelay(2000, 4000);
             resultContent = await nytimesPage.evaluate(() => document.body.innerText.toLowerCase()).catch(() => resultContent);
