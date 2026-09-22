@@ -997,6 +997,7 @@ async function redeemSubscription() {
         }
 
         console.log('🔍 Looking for redeem button...');
+        const preClickUrl = nytimesPage.url();
         const redeemHandle = await nytimesPage.evaluateHandle(() => {
             const buttons = Array.from(document.querySelectorAll('button, a, input[type="submit"]'));
             return buttons.find(b => {
@@ -1078,21 +1079,28 @@ async function redeemSubscription() {
         }
 
         let isSuccess = includesAny(resultContent, SUCCESS_SIGNALS);
+        let confirmedAlreadyRedeemed = false;
 
         // NYT's redemption confirmation occasionally renders a transient error
         // page (wording varies — a "technical issue" message, or just a generic
         // spinner/"Troubleshooting Guide" error screen) even though the
         // redemption already went through server-side — confirmed by access
-        // being active on the account despite the script logging UNCLEAR. A
-        // reload reliably shows the real confirmation page when this happens,
-        // but the transient error can persist across more than one reload
-        // (seen 2026-08-24), so retry a few times on ANY ambiguous (non-success)
-        // result rather than only known error wording.
+        // being active on the account despite the script logging UNCLEAR.
+        // Reloading that same broken confirmation URL just re-triggers the same
+        // render failure, so instead re-navigate to the original activation URL:
+        // if the redeem call went through, that URL's own "already redeemed"
+        // check (see above) reliably reports it independent of the confirmation
+        // page's rendering.
         for (let attempt = 0; !isSuccess && attempt < 3; attempt++) {
-            console.log(`⚠️  Ambiguous result after redeem click — reloading to check real state... (attempt ${attempt + 1}/3)`);
-            await nytimesPage.reload({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null);
+            console.log(`⚠️  Ambiguous result after redeem click — re-checking redemption state... (attempt ${attempt + 1}/3)`);
+            await nytimesPage.goto(preClickUrl, { waitUntil: 'networkidle2', timeout: 30000 }).catch(() => null);
             await randomDelay(2000, 4000);
             resultContent = await nytimesPage.evaluate(() => document.body.innerText.toLowerCase()).catch(() => resultContent);
+            if (resultContent.includes('already redeemed') || resultContent.includes('already claimed')) {
+                confirmedAlreadyRedeemed = true;
+                isSuccess = true;
+                break;
+            }
             isSuccess = includesAny(resultContent, SUCCESS_SIGNALS);
         }
 
@@ -1100,7 +1108,7 @@ async function redeemSubscription() {
             console.log('✅ Redemption successful!');
             await safeScreenshot(nytimesPage, 'success.png');
             await saveCookies(nytimesPage);
-            await logAttempt(true, 'SUCCESS', giftCode);
+            await logAttempt(true, confirmedAlreadyRedeemed ? 'ALREADY_REDEEMED' : 'SUCCESS', giftCode);
             return true;
         }
 
